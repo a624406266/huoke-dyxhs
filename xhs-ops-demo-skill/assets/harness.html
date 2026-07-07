@@ -1,0 +1,1358 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Harness 控制台</title>
+  <style>
+    :root {
+      --bg: #f7f7f5;
+      --surface: #ffffff;
+      --surface-soft: #f4f4f2;
+      --text: #1f1f1f;
+      --muted: #6b6b6b;
+      --line: #dededb;
+      --line-strong: #c9c9c5;
+      --primary: #111111;
+      --primary-hover: #2b2b2b;
+      --green: #147d4f;
+      --orange: #a85d00;
+      --red: #c0392b;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .05);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background: var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    h1 { margin: 0; font-size: 17px; font-weight: 760; letter-spacing: 0; }
+    .sub { margin-top: 6px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    a, .link-btn {
+      color: var(--text); font-weight: 760; text-decoration: none;
+    }
+    button, .button-link {
+      height: 38px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 0 12px;
+      display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+      font-size: 13px; font-weight: 760; color: var(--text);
+    }
+    button:hover, .button-link:hover { border-color: var(--line-strong); background: #f8f8f7; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    input {
+      width: 100%; height: 40px; border: 1px solid var(--line-strong); border-radius: 8px; padding: 0 11px;
+      font-size: 14px; color: var(--text); background: var(--surface);
+    }
+    input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px rgba(17, 17, 17, .08); }
+    button.primary { border-color: var(--primary); color: white; background: var(--primary); }
+    button.primary:hover { background: var(--primary-hover); }
+    button.danger { border: 0; color: white; background: var(--red); }
+    button.secondary { background: #4b4b4b; color: white; border: 0; }
+    .button-link { gap: 8px; }
+    .app-shell {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 268px minmax(0, 1fr);
+    }
+    .sidebar {
+      min-height: 100vh;
+      position: sticky;
+      top: 0;
+      align-self: start;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding: 18px;
+      background: var(--surface);
+      border-right: 1px solid var(--line);
+    }
+    .brand { display: flex; align-items: center; gap: 10px; padding: 2px 2px 8px; }
+    .brand-mark {
+      width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--line);
+      display: grid; place-items: center; font-weight: 800; background: #f0f0ee;
+    }
+    .side-menu { display: grid; gap: 4px; }
+    .menu-item {
+      width: 100%;
+      justify-content: flex-start;
+      height: 36px;
+      border: 0;
+      box-shadow: none;
+      background: transparent;
+      color: #343434;
+      font-weight: 680;
+    }
+    .menu-item:hover, .menu-item.active { background: var(--surface-soft); }
+    .menu-item.active { color: #111; }
+    .sidebar-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .sidebar-actions button, .sidebar-actions .button-link { box-shadow: none; height: 36px; }
+    .side-panel {
+      border-top: 1px solid var(--line);
+      padding-top: 14px;
+    }
+    .content {
+      min-width: 0;
+      padding: 26px 34px 42px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .page-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--line);
+    }
+    .page-title { margin: 0; font-size: 26px; font-weight: 760; }
+    .page { display: none; flex-direction: column; gap: 18px; }
+    .page.active { display: flex; }
+    .card, .section {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }
+    .section { padding: 18px; }
+    h2 { margin: 0 0 14px; font-size: 17px; display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    h3 { margin: 0 0 8px; font-size: 14px; }
+    .small { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .status { padding: 12px; border-radius: 8px; background: var(--surface-soft); border: 1px solid var(--line); line-height: 1.55; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .grid.two { grid-template-columns: 1fr 1fr; }
+    .filter-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; align-items: end; }
+    .metric { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #fbfbfa; }
+    .metric b { display: block; font-size: 22px; margin-bottom: 4px; }
+    .pill { display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 760; background: #eeeeec; color: #3f3f3f; }
+    .pill.active, .pill.applied { background: #e4f3eb; color: var(--green); }
+    .pill.candidate, .pill.pending { background: #fff2dc; color: var(--orange); }
+    .pill.disabled, .pill.dismissed { background: #eeeeec; color: #626262; }
+    .pill.analyzed { background: #ececec; color: #333333; }
+    .pill.lead, .pill.keep, .pill.allow, .pill.pass { background: #e4f3eb; color: var(--green); }
+    .pill.drop, .pill.ignore, .pill.reject, .pill.block { background: #f9e7e4; color: var(--red); }
+    .list { display: grid; gap: 10px; }
+    .item { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #fbfbfa; }
+    .item-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 6px; }
+    .trace-output, .feedback-output, .audit-output {
+      max-height: 150px; overflow: auto; padding: 10px; border-radius: 8px; background: white;
+      border: 1px solid var(--line); white-space: pre-wrap; font-size: 12px; color: #383838;
+    }
+    .feedback-output { max-height: 160px; }
+    .audit-output { max-height: 190px; }
+    .feedback-action {
+      display: none; align-items: center; gap: 8px; margin-top: 10px; padding: 9px 10px;
+      border-radius: 8px; background: var(--surface-soft); color: #333; font-size: 12px; font-weight: 760;
+    }
+    .feedback-action.error { display: flex; background: #f9e7e4; color: var(--red); }
+    .feedback-action.active { display: flex; }
+    .spinner {
+      width: 14px; height: 14px; border: 2px solid #d8d8d5; border-top-color: var(--primary);
+      border-radius: 999px; animation: spin .8s linear infinite; flex: 0 0 auto;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .timeline { max-height: 360px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: #fbfbfa; padding: 8px 12px; }
+    .event { display: grid; grid-template-columns: 80px 145px 1fr; gap: 10px; padding: 8px 0; border-bottom: 1px dashed #dbe3ef; font-size: 12px; }
+    .event:last-child { border-bottom: 0; }
+    .event .time, .event .agent { color: var(--muted); }
+    .history { display: grid; gap: 6px; max-height: 260px; overflow: auto; }
+    .history button { width: 100%; justify-content: flex-start; box-shadow: none; height: auto; min-height: 38px; text-align: left; padding: 8px 10px; }
+    .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .btn-row button { box-shadow: none; }
+    .btn-row button:disabled { opacity: .65; cursor: not-allowed; }
+    .gate { min-height: 100vh; padding: 64px 18px 42px; display: grid; place-items: start center; }
+    .gate-card { width: min(460px, 100%); padding: 22px; }
+    .gate-card label, .modal label, .section label { display: block; font-weight: 760; font-size: 13px; margin: 14px 0 8px; }
+    .gate-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+    .gate-actions button { box-shadow: none; }
+    .modal-mask {
+      position: fixed; inset: 0; background: rgba(15,23,42,.42); display: none; align-items: center; justify-content: center;
+      z-index: 50; padding: 18px;
+    }
+    .modal { width: min(680px, 100%); background: white; border-radius: 8px; box-shadow: 0 18px 40px rgba(15,23,42,.18); border: 1px solid var(--line); }
+    .modal-head { padding: 18px 20px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; }
+    .modal-head h2 { margin: 0; font-size: 18px; }
+    .modal-body { padding: 20px; }
+    .modal-actions { padding: 0 20px 20px; display: flex; gap: 10px; justify-content: flex-end; }
+    .modal-actions button { box-shadow: none; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .checks { display: flex; align-items: center; gap: 8px; margin-top: 12px; color: var(--muted); font-size: 13px; cursor: pointer; }
+    .checks input { width: 16px; height: 16px; }
+    .field-help { margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 14px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+
+    /* Interaction polish: clearer navigation, stronger focus/hover states, restrained operator-console color. */
+    :root {
+      --bg: #f3f5f7;
+      --surface: #ffffff;
+      --surface-soft: #f8faf9;
+      --text: #111318;
+      --muted: #69717d;
+      --line: #dde2e7;
+      --line-strong: #c6ced7;
+      --primary: #111318;
+      --primary-hover: #252932;
+      --accent: #0f6b57;
+      --accent-soft: #e8f4ef;
+      --blue: #315f9f;
+      --blue-soft: #e9f0fb;
+      --shadow: 0 1px 2px rgba(17, 19, 24, .06), 0 8px 24px rgba(17, 19, 24, .04);
+      --shadow-hover: 0 2px 4px rgba(17, 19, 24, .08), 0 12px 28px rgba(17, 19, 24, .07);
+      --focus-ring: 0 0 0 3px rgba(15, 107, 87, .16);
+    }
+    body { background: var(--bg); }
+    button, .button-link {
+      transition: transform .12s ease, background .14s ease, border-color .14s ease, box-shadow .14s ease, opacity .14s ease;
+      box-shadow: 0 1px 1px rgba(17,19,24,.06);
+    }
+    button:hover:not(:disabled), .button-link:hover {
+      border-color: var(--line-strong);
+      box-shadow: var(--shadow-hover);
+      transform: translateY(-1px);
+    }
+    button:active:not(:disabled), button.is-pressing:not(:disabled) {
+      transform: translateY(0) scale(.99);
+      box-shadow: 0 1px 1px rgba(17,19,24,.06);
+    }
+    button:focus-visible, .button-link:focus-visible, a:focus-visible {
+      outline: none;
+      box-shadow: var(--focus-ring);
+    }
+    button.primary {
+      border-color: var(--primary);
+      background: var(--primary);
+      color: #ffffff;
+    }
+    button.primary:hover:not(:disabled) { background: var(--primary-hover); }
+    button.secondary {
+      color: var(--text);
+      background: #ffffff;
+      border: 1px solid var(--line-strong);
+    }
+    button.secondary:hover:not(:disabled) { background: #f7f9fb; }
+    button.danger { background: var(--red); }
+    input {
+      background: #fcfdfd;
+      transition: border-color .14s ease, box-shadow .14s ease, background .14s ease;
+    }
+    input:hover { border-color: #aeb8c4; background: #ffffff; }
+    input:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
+    input[type="checkbox"] { accent-color: var(--accent); }
+    .card, .section, .gate-card {
+      border-color: #d9e0e7;
+      box-shadow: var(--shadow);
+    }
+    .sidebar {
+      background: #ffffff;
+      box-shadow: 1px 0 0 rgba(221,226,231,.7);
+    }
+    .brand-mark {
+      color: #0f4f42;
+      background: var(--accent-soft);
+      border-color: #c8e5da;
+    }
+    .menu-item {
+      position: relative;
+      border-radius: 8px;
+      padding-left: 14px;
+      transition: background .14s ease, color .14s ease, transform .12s ease;
+    }
+    .menu-item::before {
+      content: "";
+      position: absolute;
+      left: 4px;
+      top: 9px;
+      bottom: 9px;
+      width: 3px;
+      border-radius: 999px;
+      background: transparent;
+    }
+    .menu-item:hover:not(:disabled) {
+      background: #f2f6f4;
+      transform: none;
+      box-shadow: none;
+    }
+    .menu-item.active {
+      color: #0f4f42;
+      background: var(--accent-soft);
+      font-weight: 800;
+    }
+    .menu-item.active::before { background: var(--accent); }
+    .side-panel {
+      background: #fbfcfd;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .page-header {
+      background: rgba(255,255,255,.72);
+      border: 1px solid rgba(221,226,231,.8);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .section {
+      transition: box-shadow .14s ease, border-color .14s ease;
+    }
+    .section:hover { border-color: #d2dbe3; }
+    .metric, .item {
+      background: var(--surface-soft);
+      transition: transform .14s ease, border-color .14s ease, box-shadow .14s ease, background .14s ease;
+    }
+    .metric:hover, .item:hover {
+      border-color: #bcc8d4;
+      box-shadow: var(--shadow-hover);
+      transform: translateY(-1px);
+      background: #ffffff;
+    }
+    .status {
+      background: #ffffff;
+      border-left: 4px solid var(--accent);
+    }
+    .filter-grid {
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-soft);
+    }
+    .trace-output, .feedback-output, .audit-output {
+      background: #ffffff;
+      border-color: #dce5e1;
+    }
+    .pill { border-radius: 8px; }
+    .pill.active, .pill.applied, .pill.lead, .pill.keep, .pill.allow, .pill.pass {
+      background: var(--accent-soft);
+      color: #0f4f42;
+    }
+    .pill.candidate, .pill.pending { background: #fff7e6; color: #895500; }
+    .gate {
+      background: var(--bg);
+    }
+    .gate-card {
+      background: #ffffff;
+    }
+    .checks:hover { color: var(--text); }
+    @media (max-width: 1100px) {
+      .app-shell { grid-template-columns: 1fr; }
+      .sidebar { position: static; min-height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      .content { padding: 22px 18px 34px; }
+      .page-header { flex-direction: column; }
+      .grid, .grid.two { grid-template-columns: 1fr; }
+      .filter-grid { grid-template-columns: 1fr 1fr; }
+      .event { grid-template-columns: 1fr; gap: 2px; }
+      .row { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 680px) {
+      .filter-grid { grid-template-columns: 1fr; }
+      .sidebar-actions { display: grid; grid-template-columns: 1fr 1fr; }
+      .sidebar-actions .button-link, .sidebar-actions button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div id="adminGate" class="gate">
+    <div class="card gate-card">
+      <h2 id="adminGateTitle">管理员登录</h2>
+      <div id="adminGateIntro" class="small">请输入 Harness 管理密码后进入控制台。</div>
+      <label for="adminUsername">管理员账号</label>
+      <input id="adminUsername" value="admin" autocomplete="username" />
+      <label id="adminPasswordLabel" for="adminPassword">管理密码</label>
+      <input id="adminPassword" type="password" autocomplete="current-password" />
+      <div id="setupConfirmFields" style="display:none;">
+        <label for="adminPasswordConfirm">确认密码</label>
+        <input id="adminPasswordConfirm" type="password" autocomplete="new-password" />
+      </div>
+      <div id="adminLoginStatus" class="field-help">尚未登录。</div>
+      <div class="gate-actions">
+        <button id="adminLoginBtn" class="primary" onclick="adminLogin()">进入 Harness</button>
+        <button id="adminSetupBtn" class="primary" style="display:none;" onclick="setupAdmin()">初始化管理员</button>
+      </div>
+    </div>
+  </div>
+
+  <main id="harnessMain" class="app-shell" style="display:none;">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">H</div>
+        <div>
+          <h1>Agent Harness</h1>
+          <div class="small">控制台</div>
+        </div>
+      </div>
+
+      <nav class="side-menu" aria-label="Harness 菜单">
+        <button id="nav-overview" class="menu-item active" onclick="setActivePage('overview')">总览</button>
+        <button id="nav-audit" class="menu-item" onclick="setActivePage('audit')">审计日志</button>
+        <button id="nav-trace" class="menu-item" onclick="setActivePage('trace')">Agent轨迹</button>
+        <button id="nav-agents" class="menu-item" onclick="setActivePage('agents')">Agent与Prompt</button>
+        <button id="nav-feedback" class="menu-item" onclick="setActivePage('feedback')">反馈学习</button>
+        <button id="nav-settings" class="menu-item" onclick="setActivePage('settings')">系统设置</button>
+      </nav>
+
+      <div id="adminNav" class="sidebar-actions" style="display:none;">
+        <a class="button-link" href="index.html">获客工作台</a>
+        <button class="primary" onclick="refreshAll()">刷新</button>
+        <button class="secondary" onclick="adminLogout()">退出</button>
+      </div>
+
+      <div class="side-panel">
+        <h2>当前任务</h2>
+      <div id="currentTask" class="status">正在读取最新任务...</div>
+      </div>
+      <div class="side-panel">
+      <h2>历史任务</h2>
+      <div id="history" class="history"><div class="small">暂无历史任务</div></div>
+      </div>
+    </aside>
+
+    <section class="content">
+      <div class="page-header">
+        <div>
+          <div id="pageTitle" class="page-title">总览</div>
+          <div id="pageSubtitle" class="sub">任务状态、关键指标和自动进化摘要。</div>
+        </div>
+        <div class="btn-row" style="margin-top:0;">
+          <button onclick="refreshAll()">刷新</button>
+        </div>
+      </div>
+
+      <section id="page-overview" class="page active">
+        <div class="section">
+          <h2>运行总览 <span class="btn-row"><button onclick="runEval()">手动评估</button></span></h2>
+          <div id="overview" class="grid">
+            <div class="metric"><b>-</b><span class="small">Agent 调用</span></div>
+            <div class="metric"><b>-</b><span class="small">线索</span></div>
+            <div class="metric"><b>-</b><span class="small">Prompt 候选</span></div>
+            <div class="metric"><b>-</b><span class="small">状态</span></div>
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>任务总结与进化</h2>
+          <div id="summary" class="grid two"><div class="small">暂无任务总结</div></div>
+        </div>
+      </section>
+
+      <section id="page-audit" class="page">
+        <div class="section">
+          <h2>
+            审计日志
+            <span class="btn-row" style="margin-top:0;">
+              <button onclick="useCurrentTaskForAudit()">当前任务</button>
+              <button onclick="resetAuditFilters()">重置</button>
+              <button id="auditQueryBtn" class="primary" onclick="loadAuditLogs(false)">查询</button>
+            </span>
+          </h2>
+          <div class="filter-grid">
+            <div>
+              <label for="auditTaskId">Task ID</label>
+              <input id="auditTaskId" inputmode="numeric" placeholder="全部" />
+            </div>
+            <div>
+              <label for="auditStage">Stage</label>
+              <input id="auditStage" placeholder="全部" />
+            </div>
+            <div>
+              <label for="auditEntityType">Entity Type</label>
+              <input id="auditEntityType" placeholder="全部" />
+            </div>
+            <div>
+              <label for="auditDecision">Decision</label>
+              <input id="auditDecision" placeholder="全部" />
+            </div>
+            <div>
+              <label for="auditKeyword">Keyword</label>
+              <input id="auditKeyword" placeholder="全部" />
+            </div>
+            <div>
+              <label for="auditOffset">Offset</label>
+              <input id="auditOffset" type="number" min="0" value="0" />
+            </div>
+            <div>
+              <label for="auditLimit">Limit</label>
+              <input id="auditLimit" type="number" min="1" max="100" value="100" />
+            </div>
+          </div>
+          <div class="pager">
+            <div id="auditStatus" class="small">尚未查询。</div>
+            <div class="btn-row" style="margin-top:0;">
+              <button id="auditPrev" onclick="pageAudit(-1)">上一页</button>
+              <button id="auditNext" onclick="pageAudit(1)">下一页</button>
+            </div>
+          </div>
+          <div id="auditLogs" class="list" style="margin-top:14px;"><div class="small">暂无审计日志</div></div>
+        </div>
+      </section>
+
+      <section id="page-trace" class="page">
+        <div class="section">
+          <h2>Agent 执行轨迹</h2>
+          <div id="trace" class="list"><div class="small">暂无执行轨迹</div></div>
+        </div>
+
+        <div class="section">
+          <h2>任务事件</h2>
+          <div id="events" class="timeline"><div class="small">暂无事件</div></div>
+        </div>
+      </section>
+
+      <section id="page-agents" class="page">
+        <div class="section">
+          <h2>Agent 拓扑</h2>
+          <div id="agents" class="grid two"><div class="small">正在读取 Agent 列表...</div></div>
+        </div>
+
+        <div class="section">
+          <h2>提示词 / Skill 版本</h2>
+          <div id="prompts" class="list"><div class="small">正在读取提示词版本...</div></div>
+        </div>
+      </section>
+
+      <section id="page-feedback" class="page">
+        <div class="section">
+          <h2>反馈学习队列</h2>
+          <div id="feedbackQueue" class="list"><div class="small">正在读取反馈队列...</div></div>
+        </div>
+      </section>
+
+      <section id="page-settings" class="page">
+        <div class="section">
+          <h2>系统设置 <span class="btn-row" style="margin-top:0;"><button id="saveSettingsBtn" class="primary" onclick="saveSettings()">保存</button></span></h2>
+          <label for="settingApiBase">API 中转站地址</label>
+          <input id="settingApiBase" placeholder="例如：https://poolrouter.com/v1" />
+          <div class="field-help">OpenAI 兼容接口 base URL，通常以 /v1 结尾。</div>
+
+          <div class="row">
+            <div>
+              <label for="settingModel">模型名称</label>
+              <input id="settingModel" placeholder="例如：gemini-3.5-flash" />
+            </div>
+            <div>
+              <label for="settingTemperature">Temperature</label>
+              <input id="settingTemperature" type="number" min="0" max="2" step="0.1" value="0.6" />
+            </div>
+          </div>
+
+          <label for="settingApiKey">API Key</label>
+          <input id="settingApiKey" type="password" placeholder="留空则保留当前密钥" autocomplete="off" />
+          <div id="apiKeyHelp" class="field-help">已保存的密钥不会回显。输入新 Key 后会覆盖当前配置。</div>
+
+          <label for="settingXhsBin">XHS 路径</label>
+          <input id="settingXhsBin" placeholder="本机可填 xhs 或 venv 中的 xhs 绝对路径" />
+
+          <label class="checks"><input id="settingRedactUser" type="checkbox" />工作台展示时打码公开昵称和用户 ID</label>
+
+          <label>默认采集延迟（秒）</label>
+          <div class="row">
+            <input id="settingDelayMin" type="number" min="0" max="120" value="7" />
+            <input id="settingDelayMax" type="number" min="0" max="120" value="60" />
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    function displayText(value) {
+      return String(value ?? '')
+        .replaceAll('微闻云', '当前工作台')
+        .replaceAll('内部销售', '使用者')
+        .replaceAll('销售团队', '团队')
+        .replaceAll('销售人员', '使用者');
+    }
+    const esc = (s) => displayText(s).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+    const fmt = (n) => Number(n || 0).toLocaleString('zh-CN');
+    let currentTaskId = localStorage.getItem('currentTaskId') || '';
+    let latestTask = null;
+    let latestPrompts = [];
+    let latestFeedback = [];
+    let adminReady = false;
+    let activePage = localStorage.getItem('harnessActivePage') || 'overview';
+    if (activePage === 'sales') activePage = 'overview';
+    let adminSetupMode = false;
+    let settingsLoaded = false;
+    const auditState = { offset: 0, limit: 100, total: 0, hasMore: false, loaded: false, loading: false };
+    const busyFeedback = new Set();
+    function wireButtonFeedback() {
+      document.addEventListener('pointerdown', event => {
+        const button = event.target.closest('button');
+        if (!button || button.disabled) return;
+        button.classList.add('is-pressing');
+      });
+      ['pointerup', 'pointercancel', 'pointerleave'].forEach(type => {
+        document.addEventListener(type, event => {
+          const button = event.target.closest('button');
+          if (button) button.classList.remove('is-pressing');
+        });
+      });
+    }
+    async function withButtonBusy(buttonId, busyText, action) {
+      const button = $(buttonId);
+      if (!button) return action();
+      const oldText = button.textContent;
+      button.disabled = true;
+      button.textContent = busyText;
+      try {
+        return await action();
+      } finally {
+        button.disabled = false;
+        button.textContent = oldText;
+      }
+    }
+    const PAGE_COPY = {
+      overview: ['总览', '任务状态、关键指标和自动进化摘要。'],
+      audit: ['审计日志', '按任务、阶段、实体、决策和关键词检索 Harness 审计记录。'],
+      trace: ['Agent轨迹', '查看当前任务的 Agent 调用链路和事件流。'],
+      agents: ['Agent与Prompt', '管理 Agent 拓扑、提示词候选和当前版本。'],
+      feedback: ['反馈学习', '分析人工反馈并应用到运行时 Prompt/Skill。'],
+      settings: ['系统设置', '配置模型、中转站、XHS 路径和工作台展示策略。']
+    };
+    const AGENT_DISPLAY_NAMES = {
+      chief_orchestrator: '总控编排 Agent',
+      planning_agent: '搜索规划 Agent',
+      relevance_agent: '相关性判断 Agent',
+      lead_signal_agent: '线索识别 Agent',
+      product_strategy_agent: '产品策略 Agent',
+      critic_qa_agent: '质检风控 Agent',
+      report_agent: '报告 Agent',
+      reflection_evolution_agent: '复盘进化 Agent',
+      'Chief Orchestrator': '总控编排 Agent',
+      'Planning Agent': '搜索规划 Agent',
+      'Relevance Agent': '相关性判断 Agent',
+      'Lead Signal Agent': '线索识别 Agent',
+      'Product Strategy Agent': '产品策略 Agent',
+      'Critic / QA Agent': '质检风控 Agent',
+      'Report Agent': '报告 Agent',
+      'Reflection / Evolution Agent': '复盘进化 Agent',
+      'Auth Agent': '登录检查',
+      'Tool Harness': '工具 Harness',
+      'Delay Guard': '延迟保护',
+      'Keyword Agent': '关键词规划 Agent',
+      'Search Agent': '搜索读取 Agent',
+      'Signal Agent': '线索信号 Agent',
+      'Product Match Agent': '产品匹配 Agent',
+      'QA Agent': '质检汇总 Agent',
+    };
+    const PURPOSE_DISPLAY_NAMES = {
+      'task orchestration': '任务理解与阶段编排',
+      'search planning': '搜索策略规划',
+      'batch note relevance': '批量笔记相关性判断',
+      'adaptive relevance review': '自适应相关性复审',
+      'batch lead signal detection': '批量线索信号识别',
+      'adaptive lead review': '自适应线索复审',
+      'product match and outreach copy': '产品匹配与人工跟进话术',
+      'quality and safety review': '质量与安全边界检查',
+      'sales report generation': '获客报告生成',
+      'task reflection and evolution': '任务复盘与进化候选生成',
+    };
+    const FEEDBACK_LABELS = {
+      valid_lead: '有效线索',
+      invalid_lead: '误判线索',
+      missed_lead: '漏识别线索',
+      wrong_product: '产品匹配不准',
+      bad_outreach: '跟进话术不合适',
+      other: '其他'
+    };
+
+    function apiBase() {
+      return location.protocol === 'file:' ? 'http://127.0.0.1:8765' : '';
+    }
+
+    function setActivePage(page) {
+      if (!PAGE_COPY[page]) page = 'overview';
+      activePage = page;
+      localStorage.setItem('harnessActivePage', page);
+      Object.keys(PAGE_COPY).forEach(key => {
+        const nav = $(`nav-${key}`);
+        const panel = $(`page-${key}`);
+        if (nav) nav.classList.toggle('active', key === page);
+        if (panel) panel.classList.toggle('active', key === page);
+      });
+      $('pageTitle').textContent = PAGE_COPY[page][0];
+      $('pageSubtitle').textContent = PAGE_COPY[page][1];
+      if (page === 'settings') loadSettings();
+      if (page === 'audit' && !auditState.loaded) loadAuditLogs(true);
+    }
+
+    function showAdminGate(message = '请先登录。') {
+      adminReady = false;
+      adminSetupMode = false;
+      $('adminGateTitle').textContent = '管理员登录';
+      $('adminGateIntro').textContent = '请输入 Harness 管理密码后进入控制台。';
+      $('adminPasswordLabel').textContent = '管理密码';
+      $('setupConfirmFields').style.display = 'none';
+      $('adminLoginBtn').style.display = 'inline-flex';
+      $('adminSetupBtn').style.display = 'none';
+      $('adminGate').style.display = 'grid';
+      $('harnessMain').style.display = 'none';
+      $('adminNav').style.display = 'none';
+      $('adminLoginStatus').textContent = message;
+      $('adminLoginStatus').style.color = 'var(--muted)';
+    }
+
+    function showSetupGate(message = '首次本地启动，请先设置 Harness 管理员密码。') {
+      adminReady = false;
+      adminSetupMode = true;
+      $('adminGateTitle').textContent = '初始化管理员';
+      $('adminGateIntro').textContent = '本地 SQLite 中还没有管理员。设置后即可进入 Harness。';
+      $('adminPasswordLabel').textContent = '新管理密码';
+      $('setupConfirmFields').style.display = 'block';
+      $('adminLoginBtn').style.display = 'none';
+      $('adminSetupBtn').style.display = 'inline-flex';
+      $('adminGate').style.display = 'grid';
+      $('harnessMain').style.display = 'none';
+      $('adminNav').style.display = 'none';
+      $('adminLoginStatus').textContent = message;
+      $('adminLoginStatus').style.color = 'var(--muted)';
+    }
+
+    function showHarness() {
+      adminReady = true;
+      adminSetupMode = false;
+      $('adminGate').style.display = 'none';
+      $('harnessMain').style.display = 'grid';
+      $('adminNav').style.display = 'inline-flex';
+      setActivePage(activePage);
+    }
+
+    async function adminMe() {
+      const res = await fetch(`${apiBase()}/api/auth/me`, { credentials: 'same-origin' });
+      if (!res.ok) throw new Error('未登录');
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error || '未登录');
+      if (json.data?.user?.role !== 'admin') throw new Error('不是管理员会话');
+      return json.data;
+    }
+
+    async function adminLogin() {
+      return withButtonBusy('adminLoginBtn', '正在进入...', async () => {
+        const username = $('adminUsername').value.trim() || 'admin';
+        const password = $('adminPassword').value;
+        $('adminLoginStatus').textContent = '正在验证管理密码...';
+        $('adminLoginStatus').style.color = 'var(--muted)';
+        try {
+          const res = await fetch(`${apiBase()}/api/auth/login`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password, role: 'admin' })
+          });
+          const json = await res.json();
+          if (!json.ok) throw new Error(json.error || '登录失败');
+          $('adminPassword').value = '';
+          showHarness();
+          await refreshAll();
+        } catch (err) {
+          $('adminLoginStatus').textContent = '登录失败：' + (err.message || err);
+          $('adminLoginStatus').style.color = 'var(--red)';
+        }
+      });
+    }
+
+    async function setupAdmin() {
+      return withButtonBusy('adminSetupBtn', '正在初始化...', async () => {
+        const username = $('adminUsername').value.trim() || 'admin';
+        const password = $('adminPassword').value;
+        const confirm = $('adminPasswordConfirm').value;
+        if (!password || password.length < 6) {
+          $('adminLoginStatus').textContent = '管理密码至少需要 6 位。';
+          $('adminLoginStatus').style.color = 'var(--red)';
+          return;
+        }
+        if (password !== confirm) {
+          $('adminLoginStatus').textContent = '两次输入的密码不一致。';
+          $('adminLoginStatus').style.color = 'var(--red)';
+          return;
+        }
+        try {
+          const res = await fetch(`${apiBase()}/api/setup/admin`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+          });
+          const json = await res.json();
+          if (!json.ok) throw new Error(json.error || '初始化失败');
+          $('adminPassword').value = '';
+          $('adminPasswordConfirm').value = '';
+          showHarness();
+          await refreshAll();
+        } catch (err) {
+          $('adminLoginStatus').textContent = '初始化失败：' + (err.message || err);
+          $('adminLoginStatus').style.color = 'var(--red)';
+        }
+      });
+    }
+
+    async function adminLogout() {
+      try {
+        await fetch(`${apiBase()}/api/auth/logout`, { method: 'POST', credentials: 'same-origin' });
+      } catch {}
+      showAdminGate('已退出 Harness。');
+    }
+
+    async function bootAdmin() {
+      const setup = await fetch(`${apiBase()}/api/setup/status`, { credentials: 'same-origin' }).then(res => res.json()).catch(() => null);
+      if (!setup?.data?.hasAdmin) {
+        showSetupGate();
+        return;
+      }
+      try {
+        await adminMe();
+        showHarness();
+        await refreshAll();
+      } catch {
+        showAdminGate('请先登录 Harness。');
+      }
+    }
+
+    function formatTime(ts) {
+      if (!ts) return '-';
+      return new Date(Number(ts) * 1000).toLocaleString('zh-CN', { hour12: false });
+    }
+
+    function formatAnyTime(value) {
+      if (!value) return '-';
+      if (typeof value === 'number' || /^\d+(\.\d+)?$/.test(String(value))) {
+        const numeric = Number(value);
+        const millis = numeric > 100000000000 ? numeric : numeric * 1000;
+        return new Date(millis).toLocaleString('zh-CN', { hour12: false });
+      }
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false });
+    }
+
+    function safeClass(value) {
+      return String(value || '').toLowerCase().replace(/[^a-z0-9_-]+/g, '-').slice(0, 32);
+    }
+
+    function statusLabel(status) {
+      return { running:'运行中', completed:'已完成', failed:'失败', stopped:'已停止', interrupted:'已中断' }[status] || status || '未知';
+    }
+
+    function promptStatusLabel(status) {
+      return { active:'当前版本', candidate:'候选版本', disabled:'已禁用' }[status] || status || '未知';
+    }
+
+    function feedbackStatusLabel(status) {
+      return { pending:'待分析', analyzed:'已分析', applied:'已应用', dismissed:'已忽略' }[status] || status || '未知';
+    }
+
+    function agentLabel(value) {
+      return AGENT_DISPLAY_NAMES[value] || value || 'Agent';
+    }
+
+    function purposeLabel(value) {
+      return PURPOSE_DISPLAY_NAMES[value] || value || '';
+    }
+
+    function disableLabel(status) {
+      if (status === 'active') return '禁用并回滚';
+      if (status === 'candidate') return '禁用候选';
+      return '禁用版本';
+    }
+
+    function textBlock(value, limit = 900) {
+      const text = typeof value === 'string' ? value : JSON.stringify(value || {}, null, 2);
+      return esc(text.slice(0, limit));
+    }
+
+    async function post(path, body = {}) {
+      const res = await fetch(`${apiBase()}${path}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (res.status === 401 || res.status === 403) {
+        showAdminGate('管理员会话已过期，请重新登录。');
+        throw new Error('管理员会话已过期');
+      }
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error || '请求失败');
+      return json.data;
+    }
+
+    async function get(path) {
+      const res = await fetch(`${apiBase()}${path}`, { credentials: 'same-origin' });
+      if (res.status === 401 || res.status === 403) {
+        showAdminGate('管理员会话已过期，请重新登录。');
+        throw new Error('管理员会话已过期');
+      }
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error || '请求失败');
+      return json.data;
+    }
+
+    async function refreshAll() {
+      await Promise.allSettled([loadAgents(), loadPrompts(), loadFeedback(), loadHistory()]);
+      await loadTask(currentTaskId);
+      if (activePage === 'audit' && (auditState.loaded || currentTaskId)) await loadAuditLogs(false);
+      if (activePage === 'settings') await loadSettings(true);
+    }
+
+    async function loadHistory() {
+      const data = await post('/api/admin/tasks/list', { limit: 20 });
+      const tasks = data.tasks || [];
+      if (!currentTaskId && tasks[0]) currentTaskId = String(tasks[0].id);
+      $('history').innerHTML = tasks.length ? tasks.map(t => `
+        <button onclick="selectTask(${Number(t.id)})">
+          <span>#${fmt(t.id)} · ${esc(statusLabel(t.status))}<br><span class="small">${esc(t.keyword || '无关键词')} · 笔记 ${fmt(t.notesCount)} · 线索 ${fmt(t.leadsCount)} · ${formatTime(t.updatedAt)}</span></span>
+        </button>
+      `).join('') : '<div class="small">暂无历史任务</div>';
+    }
+
+    async function selectTask(taskId) {
+      currentTaskId = String(taskId);
+      localStorage.setItem('currentTaskId', currentTaskId);
+      await loadTask(currentTaskId);
+    }
+
+    async function loadTask(taskId) {
+      if (!taskId) {
+        $('currentTask').textContent = '暂无任务。请先在获客工作台启动一次扫描。';
+        return;
+      }
+      const data = await post('/api/admin/tasks/status', { taskId });
+      if (!data || data.hasTask === false) {
+        $('currentTask').textContent = '没有找到该任务。';
+        return;
+      }
+      latestTask = data;
+      renderTask(data);
+    }
+
+    async function loadAgents() {
+      const data = await get('/api/agents');
+      const agents = data.agents || [];
+      $('agents').innerHTML = agents.map(agent => `
+        <div class="item">
+          <div class="item-head">
+            <b>${esc(agentLabel(agent.key || agent.name))}</b>
+            <span class="pill">${esc(agent.version)}</span>
+          </div>
+          <div class="small">${esc(agent.role)}</div>
+        </div>
+      `).join('') || '<div class="small">暂无 Agent</div>';
+    }
+
+    async function loadPrompts() {
+      const data = await get('/api/prompts');
+      latestPrompts = data.prompts || [];
+      renderPrompts(latestPrompts);
+    }
+
+    async function loadFeedback() {
+      try {
+        const data = await get('/api/feedback/list?limit=100');
+        latestFeedback = data.feedback || [];
+        renderFeedback(latestFeedback);
+      } catch (err) {
+        $('feedbackQueue').innerHTML = `<div class="small" style="color:var(--red);">读取反馈队列失败：${esc(err.message || err)}。请确认后端已重启并加载最新代码。</div>`;
+      }
+    }
+
+    function auditPayload() {
+      const limit = Math.min(Math.max(Number($('auditLimit').value || 100), 1), 100);
+      const offset = Math.max(0, Number($('auditOffset').value || auditState.offset || 0));
+      $('auditLimit').value = String(limit);
+      $('auditOffset').value = String(offset);
+      auditState.limit = limit;
+      auditState.offset = offset;
+      const body = { limit, offset };
+      const taskId = $('auditTaskId').value.trim();
+      const stage = $('auditStage').value.trim();
+      const entityType = $('auditEntityType').value.trim();
+      const decision = $('auditDecision').value.trim();
+      const keyword = $('auditKeyword').value.trim();
+      if (taskId) body.taskId = /^\d+$/.test(taskId) ? Number(taskId) : taskId;
+      if (stage) body.stage = stage;
+      if (entityType) body.entityType = entityType;
+      if (decision) body.decision = decision;
+      if (keyword) body.keyword = keyword;
+      return body;
+    }
+
+    function auditItemsFrom(data) {
+      if (Array.isArray(data)) return data;
+      return data?.items || data?.logs || data?.auditLogs || data?.audit || data?.rows || [];
+    }
+
+    function renderAuditLogs(items, data = {}) {
+      const offset = Number(data.offset ?? auditState.offset ?? 0);
+      const limit = Number(data.limit ?? auditState.limit ?? 100);
+      const total = Number(data.total ?? data.totalCount ?? data.count ?? 0);
+      auditState.offset = offset;
+      auditState.limit = limit;
+      auditState.total = total;
+      auditState.hasMore = Boolean(data.hasMore ?? data.has_more ?? (items.length >= limit && (!total || offset + items.length < total)));
+      $('auditOffset').value = String(offset);
+      $('auditPrev').disabled = offset <= 0;
+      $('auditNext').disabled = !auditState.hasMore;
+      if (!items.length) {
+        $('auditStatus').textContent = total ? `共 ${fmt(total)} 条，当前页为空。` : '未找到匹配审计日志。';
+        $('auditLogs').innerHTML = '<div class="small">暂无审计日志</div>';
+        return;
+      }
+      const end = offset + items.length;
+      $('auditStatus').textContent = total
+        ? `显示 ${fmt(offset + 1)}-${fmt(end)} / ${fmt(total)} 条`
+        : `显示 ${fmt(offset + 1)}-${fmt(end)} 条`;
+      $('auditLogs').innerHTML = items.map(item => {
+        const taskId = item.taskId ?? item.task_id ?? '-';
+        const stage = item.stage ?? item.phase ?? item.agentStage ?? '-';
+        const entityType = item.entityType ?? item.entity_type ?? item.type ?? '-';
+        const entityId = item.entityId ?? item.entity_id ?? item.noteId ?? item.note_id ?? item.commentId ?? item.comment_id ?? item.leadId ?? item.lead_id ?? '-';
+        const decision = item.decision ?? item.action ?? item.result ?? item.status ?? '-';
+        const agent = agentLabel(item.agentKey ?? item.agent_key ?? item.agentName ?? item.agent_name ?? item.agent);
+        const message = item.message ?? item.reason ?? item.summary ?? item.decisionSummary ?? item.evidence ?? '';
+        const keyword = item.sourceKeyword ?? item.source_keyword ?? item.keyword ?? item.query ?? '';
+        const createdAt = item.createdAt ?? item.created_at ?? item.time ?? item.timestamp;
+        return `
+          <div class="item">
+            <div class="item-head">
+              <div>
+                <b>${esc(agent)} <span class="mono">#${esc(taskId)}</span></b>
+                <div class="small">${esc(stage)} · ${esc(entityType)}:${esc(entityId)}${keyword ? ` · ${esc(keyword)}` : ''} · ${formatAnyTime(createdAt)}</div>
+              </div>
+              <span class="pill ${safeClass(decision)}">${esc(decision)}</span>
+            </div>
+            ${message ? `<div class="small">${esc(message)}</div>` : ''}
+            <div class="audit-output">${textBlock(item, 1800)}</div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function loadAuditLogs(reset = false) {
+      if (!adminReady) return showAdminGate('请先登录 Harness。');
+      if (auditState.loading) return;
+      if (reset) {
+        auditState.offset = 0;
+        $('auditOffset').value = '0';
+      }
+      if (!$('auditTaskId').value.trim() && (latestTask?.taskId || currentTaskId)) {
+        $('auditTaskId').value = latestTask?.taskId || currentTaskId;
+      }
+      if (!$('auditTaskId').value.trim()) {
+        auditState.loaded = false;
+        auditState.hasMore = false;
+        $('auditPrev').disabled = true;
+        $('auditNext').disabled = true;
+        $('auditStatus').textContent = '请先选择任务或输入 Task ID。';
+        $('auditLogs').innerHTML = '<div class="small">暂无审计日志</div>';
+        return;
+      }
+      auditState.loaded = true;
+      auditState.loading = true;
+      $('auditPrev').disabled = true;
+      $('auditNext').disabled = true;
+      $('auditStatus').textContent = '正在读取审计日志...';
+      const queryBtn = $('auditQueryBtn');
+      const queryText = queryBtn?.textContent;
+      if (queryBtn) {
+        queryBtn.disabled = true;
+        queryBtn.textContent = '查询中...';
+      }
+      try {
+        const data = await post('/api/admin/tasks/audit', auditPayload());
+        renderAuditLogs(auditItemsFrom(data), data || {});
+      } catch (err) {
+        auditState.hasMore = false;
+        $('auditStatus').innerHTML = `<span style="color:var(--red);">读取失败：${esc(err.message || err)}</span>`;
+        $('auditLogs').innerHTML = '<div class="small">审计接口暂不可用或当前后端尚未实现该路径。</div>';
+      } finally {
+        auditState.loading = false;
+        if (queryBtn) {
+          queryBtn.disabled = false;
+          queryBtn.textContent = queryText;
+        }
+      }
+    }
+
+    function pageAudit(direction) {
+      const limit = Math.min(Math.max(Number($('auditLimit').value || auditState.limit || 100), 1), 100);
+      auditState.offset = direction < 0 ? Math.max(0, auditState.offset - limit) : auditState.offset + limit;
+      $('auditOffset').value = String(auditState.offset);
+      loadAuditLogs(false);
+    }
+
+    function useCurrentTaskForAudit() {
+      $('auditTaskId').value = latestTask?.taskId || currentTaskId || '';
+      loadAuditLogs(true);
+    }
+
+    function resetAuditFilters() {
+      ['auditTaskId', 'auditStage', 'auditEntityType', 'auditDecision', 'auditKeyword'].forEach(id => $(id).value = '');
+      $('auditOffset').value = '0';
+      $('auditLimit').value = '100';
+      auditState.offset = 0;
+      auditState.total = 0;
+      auditState.hasMore = false;
+      auditState.loaded = false;
+      $('auditStatus').textContent = '尚未查询。';
+      $('auditPrev').disabled = true;
+      $('auditNext').disabled = true;
+      $('auditLogs').innerHTML = '<div class="small">暂无审计日志</div>';
+    }
+
+    function renderTask(data) {
+      const trace = data.agentTrace || [];
+      const summary = data.taskSummary || {};
+      const leads = data.leads?.leads || [];
+      const candidateCount = (data.promptVersionSummary || latestPrompts || []).reduce((sum, item) => sum + Number(item.candidates || (item.status === 'candidate' ? 1 : 0)), 0);
+      $('currentTask').innerHTML = `
+        <b>#${fmt(data.taskId)} · ${esc(statusLabel(data.status))}</b>
+        <div class="small">${esc(data.statusText || '')}</div>
+        <div class="small">更新：${formatTime(data.updatedAt)}</div>
+      `;
+      $('overview').innerHTML = `
+        <div class="metric"><b>${fmt(trace.length)}</b><span class="small">Agent 调用</span></div>
+        <div class="metric"><b>${fmt(leads.length)}</b><span class="small">线索</span></div>
+        <div class="metric"><b>${fmt(candidateCount)}</b><span class="small">候选版本</span></div>
+        <div class="metric"><b>${esc(statusLabel(data.status))}</b><span class="small">任务状态</span></div>
+      `;
+      $('trace').innerHTML = trace.length ? trace.map(run => `
+        <div class="item">
+          <div class="item-head">
+            <b>${esc(agentLabel(run.agentKey || run.agentName))}</b>
+            <span class="pill">${Math.round(Number(run.confidence || 0) * 100)}%</span>
+          </div>
+          <div class="small">${esc(purposeLabel(run.purpose))} · ${esc(run.promptVersion || '')} · ${fmt(run.durationMs)}ms · ${formatTime(run.createdAt)}</div>
+          ${run.error ? `<div class="small" style="color:var(--red);">${esc(run.error)}</div>` : ''}
+          <div class="trace-output">${textBlock(run.outputSummary)}</div>
+        </div>
+      `).join('') : '<div class="small">暂无 Agent 执行轨迹</div>';
+      const agentSummaries = summary.agent_summaries || summary.agentSummaries || [];
+      $('summary').innerHTML = `
+        <div class="item">
+          <h3>本次任务总结</h3>
+          <div class="small">${esc(summary.task_summary || summary.decision || data.evolutionSummary || '暂无复盘')}</div>
+        </div>
+        <div class="item">
+          <h3>自动进化</h3>
+          <div class="small">${esc(summary.evolution_summary || data.evolutionSummary || '暂无进化记录')}</div>
+        </div>
+        ${agentSummaries.map(item => `
+          <div class="item" id="summaryItem-${Number(item.id)}">
+            <h3>${esc(agentLabel(item.agentKey || item.agent || item.agentName))}</h3>
+            <div class="small">${esc(item.recommendation || item.weaknesses || item.strengths || '')}</div>
+          </div>
+        `).join('')}
+      `;
+      const events = data.events || [];
+      $('events').innerHTML = events.length ? events.map(e => `
+        <div class="event">
+          <div class="time">${formatTime(e.createdAt)}</div>
+          <div class="agent">${esc(agentLabel(e.agent || '-'))}</div>
+          <div>${esc(e.message || '')}</div>
+        </div>
+      `).join('') : '<div class="small">暂无事件</div>';
+    }
+
+    function renderPrompts(prompts) {
+      $('prompts').innerHTML = prompts.length ? prompts.map(prompt => `
+        <div class="item">
+          <div class="item-head">
+            <b>${esc(agentLabel(prompt.agentKey || prompt.agentName))} · ${esc(prompt.version)}</b>
+            <span class="pill ${esc(prompt.status)}">${esc(promptStatusLabel(prompt.status))}</span>
+          </div>
+          <div class="small">评分 ${Number(prompt.score || 0).toFixed(2)} · ${esc(prompt.notes || '')}</div>
+          <div class="small">来源任务：${prompt.sourceTaskId || '-'}</div>
+          <div class="btn-row">
+            ${prompt.status !== 'active' && prompt.status !== 'disabled' ? `<button class="primary" onclick="promotePrompt(${Number(prompt.id)})">设为当前版本</button>` : ''}
+            ${prompt.status !== 'disabled' ? `<button class="danger" onclick="disablePrompt(${Number(prompt.id)})">${disableLabel(prompt.status)}</button>` : ''}
+          </div>
+        </div>
+      `).join('') : '<div class="small">暂无提示词版本</div>';
+    }
+
+    function renderFeedback(items) {
+      $('feedbackQueue').innerHTML = items.length ? items.map(item => {
+        const analysis = item.analysis || {};
+        const targetAgents = analysis.target_agents || analysis.targetAgents || [];
+        const diagnosis = analysis.diagnosis || analysis.decision || '';
+        const improvements = analysis.prompt_improvements || analysis.promptImprovements || [];
+        return `
+          <div class="item" id="feedbackItem-${Number(item.id)}">
+            <div class="item-head">
+              <b>#${fmt(item.id)} · ${esc(FEEDBACK_LABELS[item.feedbackType] || item.feedbackType)}</b>
+              <span class="pill ${esc(item.status)}">${esc(feedbackStatusLabel(item.status))}</span>
+            </div>
+            <div class="small">任务 #${item.taskId || '-'} · 线索 ${esc(item.leadId || '-')} · 目标 ${esc(targetAgents.map(agentLabel).join('、') || item.targetAgentKey || '-')} · ${formatTime(item.updatedAt)}</div>
+            <div class="small">反馈：${esc(item.feedback || '-')}；说明：${esc(item.userNote || '-')}</div>
+            <div class="feedback-output">${textBlock({ evidence: item.evidence, diagnosis, recommended_action: analysis.recommended_action, improvements }, 1200)}</div>
+            <div class="btn-row">
+              ${item.status === 'pending' ? `<button class="primary" onclick="analyzeFeedback(${Number(item.id)})">AI 分析</button>` : ''}
+              ${item.status === 'analyzed' ? `<button class="primary" onclick="applyFeedback(${Number(item.id)})">确认应用</button>` : ''}
+              ${item.status === 'pending' || item.status === 'analyzed' ? `<button class="danger" onclick="dismissFeedback(${Number(item.id)})">忽略</button>` : ''}
+            </div>
+            <div class="feedback-action" id="feedbackAction-${Number(item.id)}"></div>
+          </div>
+        `;
+      }).join('') : '<div class="small">暂无反馈学习记录</div>';
+    }
+
+    function setFeedbackBusy(feedbackId, message) {
+      busyFeedback.add(Number(feedbackId));
+      const item = $(`feedbackItem-${feedbackId}`);
+      const action = $(`feedbackAction-${feedbackId}`);
+      if (!item || !action) return;
+      item.querySelectorAll('button').forEach(button => button.disabled = true);
+      action.className = 'feedback-action active';
+      action.innerHTML = `<span class="spinner"></span><span>${esc(message)}</span>`;
+    }
+
+    function setFeedbackError(feedbackId, message) {
+      busyFeedback.delete(Number(feedbackId));
+      const item = $(`feedbackItem-${feedbackId}`);
+      const action = $(`feedbackAction-${feedbackId}`);
+      if (!item || !action) return;
+      item.querySelectorAll('button').forEach(button => button.disabled = false);
+      action.className = 'feedback-action error';
+      action.textContent = message;
+    }
+
+    function clearFeedbackBusy(feedbackId) {
+      busyFeedback.delete(Number(feedbackId));
+    }
+
+    async function promotePrompt(promptId) {
+      await post('/api/prompts/promote', { promptId });
+      await loadPrompts();
+      if (currentTaskId) await loadTask(currentTaskId);
+    }
+
+    async function disablePrompt(promptId) {
+      await post('/api/prompts/disable', { promptId });
+      await loadPrompts();
+      if (currentTaskId) await loadTask(currentTaskId);
+    }
+
+    async function runEval() {
+      if (!currentTaskId) return alert('暂无任务可评估');
+      const result = await post('/api/evals/run', { taskId: currentTaskId });
+      alert(`评估完成：评分 ${Number(result.score || 0).toFixed(2)}`);
+      await loadTask(currentTaskId);
+    }
+
+    async function analyzeFeedback(feedbackId) {
+      if (busyFeedback.has(Number(feedbackId))) return;
+      setFeedbackBusy(feedbackId, 'AI 分析中，正在调用 LLM 读取反馈、原始证据和当前 Prompt，通常需要几十秒...');
+      try {
+        await post('/api/feedback/analyze', { feedbackId });
+        clearFeedbackBusy(feedbackId);
+        await loadFeedback();
+        if (currentTaskId) await loadTask(currentTaskId);
+      } catch (err) {
+        setFeedbackError(feedbackId, `AI 分析失败：${err.message || err}`);
+      }
+    }
+
+    async function applyFeedback(feedbackId) {
+      if (busyFeedback.has(Number(feedbackId))) return;
+      setFeedbackBusy(feedbackId, '正在应用修改策略，创建并启用新的运行时 Prompt/Skill 版本...');
+      try {
+        await post('/api/feedback/apply', { feedbackId });
+        clearFeedbackBusy(feedbackId);
+        await Promise.all([loadFeedback(), loadPrompts()]);
+        if (currentTaskId) await loadTask(currentTaskId);
+      } catch (err) {
+        setFeedbackError(feedbackId, `应用失败：${err.message || err}`);
+      }
+    }
+
+    async function dismissFeedback(feedbackId) {
+      if (busyFeedback.has(Number(feedbackId))) return;
+      setFeedbackBusy(feedbackId, '正在忽略该反馈...');
+      try {
+        await post('/api/feedback/dismiss', { feedbackId });
+        clearFeedbackBusy(feedbackId);
+        await loadFeedback();
+      } catch (err) {
+        setFeedbackError(feedbackId, `忽略失败：${err.message || err}`);
+      }
+    }
+
+    async function loadSettings(force = false) {
+      if (!adminReady) return showAdminGate('请先登录 Harness。');
+      if (settingsLoaded && !force) return;
+      try {
+        const s = await get('/api/settings');
+        $('settingApiBase').value = s.llm?.api_base || '';
+        $('settingModel').value = s.llm?.model || '';
+        $('settingTemperature').value = s.llm?.temperature ?? 0.6;
+        $('settingApiKey').value = '';
+        $('apiKeyHelp').textContent = s.llm?.has_api_key
+          ? '当前已配置 API Key。为安全起见不会回显；留空保存会保留原 Key。'
+          : '当前未配置 API Key。请输入中转站 Key 后保存。';
+        $('settingXhsBin').value = s.xhs?.bin || '';
+        $('settingDelayMin').value = s.xhs?.read_delay_min ?? 7;
+        $('settingDelayMax').value = s.xhs?.read_delay_max ?? 60;
+        $('settingRedactUser').checked = Boolean(s.sales?.redact_user);
+        settingsLoaded = true;
+      } catch (err) {
+        alert('读取设置失败：' + (err.message || err));
+      }
+    }
+
+    async function openSettings() {
+      setActivePage('settings');
+      await loadSettings(true);
+    }
+
+    function closeSettings() {
+      setActivePage('overview');
+    }
+
+    async function saveSettings() {
+      return withButtonBusy('saveSettingsBtn', '正在保存...', async () => {
+        const body = {
+          llm: {
+            api_base: $('settingApiBase').value.trim(),
+            model: $('settingModel').value.trim(),
+            temperature: Number($('settingTemperature').value || 0.6)
+          },
+          xhs: {
+            bin: $('settingXhsBin').value.trim(),
+            read_delay_min: Number($('settingDelayMin').value || 7),
+            read_delay_max: Number($('settingDelayMax').value || 60)
+          },
+          sales: {
+            redact_user: $('settingRedactUser').checked
+          }
+        };
+        const apiKey = $('settingApiKey').value.trim();
+        if (apiKey) body.llm.api_key = apiKey;
+        try {
+          await post('/api/settings', body);
+          settingsLoaded = true;
+          alert('设置已保存。');
+        } catch (err) {
+          alert('保存设置失败：' + (err.message || err));
+        }
+      });
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      wireButtonFeedback();
+      $('adminPassword').addEventListener('keydown', event => {
+        if (event.key === 'Enter') adminSetupMode ? setupAdmin() : adminLogin();
+      });
+      $('adminPasswordConfirm').addEventListener('keydown', event => {
+        if (event.key === 'Enter') setupAdmin();
+      });
+      ['auditTaskId', 'auditStage', 'auditEntityType', 'auditDecision', 'auditKeyword', 'auditOffset', 'auditLimit'].forEach(id => {
+        $(id).addEventListener('keydown', event => {
+          if (event.key === 'Enter') loadAuditLogs(false);
+        });
+      });
+      resetAuditFilters();
+      bootAdmin().catch(err => {
+        $('currentTask').textContent = '读取失败：' + (err.message || err);
+      });
+    });
+  </script>
+</body>
+</html>

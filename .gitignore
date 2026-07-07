@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Local agent/workspace state
+.workbuddy/
+.playwright-mcp/
+
+# Local sales-workbench runtime state
+.env
+xhs-ops-demo-skill/.env
+xhs-ops-demo-skill/config.local.json
+xhs-ops-demo-skill/.runtime/
+xhs-ops-demo-skill/data/
+xhs-ops-demo-skill/exports/
+xhs-ops-demo-skill/logs/
+deploy-package-*.tar.gz

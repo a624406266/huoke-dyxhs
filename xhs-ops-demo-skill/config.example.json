@@ -1,0 +1,26 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765
+  },
+  "xhs": {
+    "bin": "",
+    "read_delay_min": 7,
+    "read_delay_max": 60,
+    "max_count": 20
+  },
+  "llm": {
+    "api_key": "",
+    "api_base": "https://poolrouter.com/v1",
+    "model": "gemini-3.5-flash",
+    "temperature": 0.6
+  },
+  "sales": {
+    "default_min_score": 60,
+    "default_business_direction": "cloud_ai",
+    "redact_user": false
+  },
+  "storage": {
+    "db_path": "data/sales_leads.db"
+  }
+}

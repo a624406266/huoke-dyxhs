@@ -1,0 +1,6 @@
+interface:
+  display_name: "开放获客工作台"
+  short_description: "本地小红书只读获客与 Agent Harness"
+  default_prompt: "Use $open-leads-workbench to start the local lead workbench and help inspect its SQLite-backed Agent Harness."
+policy:
+  allow_implicit_invocation: true

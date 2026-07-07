@@ -1,0 +1,1289 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>开放获客工作台</title>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    :root {
+      --bg: #f7f7f8;
+      --card: #ffffff;
+      --text: #111827;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --line-strong: #d1d5db;
+      --primary: #111827;
+      --primary-soft: #f3f4f6;
+      --green: #166534;
+      --orange: #b45309;
+      --red: #b91c1c;
+      --shadow: 0 1px 2px rgba(17, 24, 39, .06);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background: var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    header { padding: 26px 38px 14px; }
+    h1 { margin: 0; font-size: 26px; display: flex; gap: 10px; align-items: center; letter-spacing: 0; }
+    h1 .badge { font-size: 12px; color: var(--text); background: var(--primary-soft); padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; }
+    .header-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .nav-actions { display: flex; align-items: center; gap: 10px; }
+    .nav-actions button { width: auto; margin-top: 0; }
+    .nav-user { color: var(--muted); font-size: 12px; font-weight: 800; }
+    .nav-link {
+      display: inline-flex; align-items: center; height: 40px; padding: 0 14px; border-radius: 8px;
+      background: #ffffff; border: 1px solid var(--line); box-shadow: none; color: var(--text);
+      font-size: 13px; font-weight: 900; white-space: nowrap;
+    }
+    .icon-btn {
+      width: 40px; height: 40px; margin: 0; border-radius: 8px; display: inline-grid; place-items: center;
+      font-size: 20px; background: #ffffff; color: var(--text); border: 1px solid var(--line); box-shadow: none;
+    }
+    .sub { margin-top: 8px; color: var(--muted); font-size: 14px; line-height: 1.55; }
+    main { padding: 0 38px 18px; display: grid; gap: 14px; align-items: start; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
+    .panel { padding: 20px; }
+    .panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+    .panel-head h2 { margin: 0; font-size: 17px; }
+    .config-grid { display: grid; grid-template-columns: minmax(280px, 1.1fr) minmax(260px, .9fr); gap: 18px; align-items: start; }
+    .field-required { color: var(--red); font-weight: 900; }
+    label { display: block; font-weight: 800; font-size: 13px; margin: 15px 0 8px; }
+    input, select, textarea {
+      width: 100%; border: 1px solid var(--line-strong); border-radius: 8px; padding: 0 12px;
+      font-size: 14px; color: var(--text); background: white;
+    }
+    input, select { height: 42px; }
+    textarea { min-height: 126px; padding: 11px 12px; resize: vertical; font: inherit; line-height: 1.5; }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px rgba(17, 24, 39, .08); }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .checks { display: flex; align-items: center; gap: 8px; margin-top: 12px; color: var(--muted); font-size: 13px; cursor: pointer; }
+    .checks input { width: 16px; height: 16px; }
+    button {
+      width: 100%; height: 44px; border: 0; border-radius: 8px; margin-top: 18px; cursor: pointer;
+      color: white; background: var(--primary); font-size: 15px; font-weight: 900;
+    }
+    button:disabled { opacity: .65; cursor: not-allowed; }
+    .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .btn-row button { width: auto; padding: 0 16px; height: 36px; margin: 0; font-size: 13px; border-radius: 8px; }
+    .btn-export { background: var(--green); }
+    .btn-md { background: #374151; }
+    .btn-stop { background: var(--red); display: none; }
+    .hint { margin-top: 14px; padding: 12px; border-radius: 8px; background: var(--primary-soft); border: 1px solid var(--line); color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .results { display: flex; flex-direction: column; gap: 14px; }
+    .status { padding: 14px 16px; color: var(--muted); font-size: 14px; display: flex; gap: 8px; align-items: center; }
+    .task-panel { display: none; padding: 18px; }
+    .history-panel { display: block; }
+    .task-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 14px; }
+    .task-head h2, .history-panel h2 { margin: 0; font-size: 17px; }
+    .progress { height: 10px; background: var(--primary-soft); border-radius: 8px; overflow: hidden; margin: 12px 0; border: 1px solid var(--line); }
+    .progress-fill { height: 100%; width: 0%; background: var(--primary); transition: width .25s ease; }
+    .timeline { max-height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: #ffffff; padding: 8px 12px; }
+    .event { display: grid; grid-template-columns: 78px 110px 1fr; gap: 10px; padding: 8px 0; border-bottom: 1px dashed #dbe3ef; font-size: 12px; }
+    .event:last-child { border-bottom: 0; }
+    .event .time, .event .agent { color: var(--muted); }
+    .event-success .msg { color: var(--green); }
+    .event-warning .msg { color: var(--orange); }
+    .event-error .msg { color: var(--red); }
+    .history-list { display: grid; gap: 8px; margin-top: 12px; }
+    .history-item { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: #ffffff; }
+    .history-item button { width: auto; height: 34px; margin: 0; padding: 0 12px; font-size: 12px; border-radius: 8px; }
+    .history-bottom { margin: 0 38px 42px; overflow: hidden; }
+    .history-bottom summary {
+      list-style: none; cursor: pointer; padding: 18px; display: flex; justify-content: space-between; gap: 12px; align-items: center;
+      font-weight: 900; font-size: 17px;
+    }
+    .history-bottom summary::-webkit-details-marker { display: none; }
+    .history-bottom summary::after {
+      content: "展开"; color: var(--text); font-size: 12px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 8px; background: #ffffff;
+    }
+    .history-bottom[open] summary { border-bottom: 1px solid var(--line); }
+    .history-bottom[open] summary::after { content: "收起"; }
+    .history-bottom .history-list { margin-top: 0; padding: 14px 18px 18px; }
+    .empty { min-height: 240px; display: grid; place-items: center; color: var(--muted); text-align: center; padding: 30px; }
+    .kpis { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; padding: 18px; }
+    .kpi { border: 1px solid var(--line); border-radius: 8px; padding: 14px; background: #ffffff; }
+    .kpi b { display: block; font-size: 22px; margin-bottom: 5px; }
+    .kpi span { color: var(--muted); font-size: 12px; }
+    .section { padding: 20px; border-top: 1px solid var(--line); }
+    .section:first-child { border-top: 0; }
+    .section h2 { margin: 0 0 14px; font-size: 18px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .table-wrap { overflow: auto; max-height: 540px; border-radius: 8px; border: 1px solid var(--line); }
+    table { width: 100%; border-collapse: collapse; min-width: 1120px; background: white; }
+    th, td { padding: 11px 12px; border-bottom: 1px solid var(--line); text-align: left; font-size: 13px; vertical-align: top; }
+    th { position: sticky; top: 0; z-index: 1; background: var(--primary-soft); color: #374151; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .pill { display: inline-block; padding: 3px 8px; border-radius: 8px; font-size: 12px; font-weight: 800; background: var(--primary-soft); color: var(--text); border: 1px solid var(--line); }
+    .pA { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
+    .pB { background: #fff7ed; color: #9a3412; border-color: #fed7aa; }
+    .pC { background: #fefce8; color: #854d0e; border-color: #fde68a; }
+    .pD { background: #f3f4f6; color: #4b5563; border-color: #d1d5db; }
+    .small { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .evidence { line-height: 1.5; color: var(--text); }
+    .copy { color: #14532d; line-height: 1.5; }
+    .feedback-cell { min-width: 210px; display: grid; gap: 8px; }
+    .feedback-cell select, .feedback-cell textarea { width: 100%; }
+    .feedback-cell textarea {
+      min-height: 58px; border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px 10px;
+      resize: vertical; font: inherit; font-size: 12px; color: var(--text);
+    }
+    .feedback-cell button { margin-top: 0; height: 36px; }
+    a { color: var(--text); font-weight: 800; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    .report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .report-box { border: 1px solid var(--line); border-radius: 8px; padding: 14px; background: #ffffff; }
+    .report-box h3 { margin: 0 0 10px; font-size: 15px; }
+    ul { margin: 0; padding-left: 18px; }
+    li { margin: 7px 0; line-height: 1.55; }
+    .summary { padding: 14px; border-radius: 8px; background: var(--primary-soft); border: 1px solid var(--line); line-height: 1.6; }
+    .result-shell { overflow: hidden; }
+    .tabs { display: flex; gap: 6px; padding: 12px 14px 0; border-bottom: 1px solid var(--line); overflow-x: auto; }
+    .tab-btn {
+      width: auto; height: 34px; margin: 0; padding: 0 12px; border-radius: 8px 8px 0 0;
+      border: 1px solid transparent; border-bottom: 0; background: transparent; color: var(--muted); font-size: 13px;
+    }
+    .tab-btn.active { background: #ffffff; color: var(--text); border-color: var(--line); }
+    .tab-panel { padding: 18px; }
+    .tab-panel[hidden] { display: none; }
+    .section-title { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px; }
+    .section-title h2 { margin: 0; font-size: 18px; }
+    .lead-list { display: grid; gap: 10px; }
+    .lead-card { border: 1px solid var(--line); border-radius: 8px; background: #ffffff; padding: 14px; display: grid; gap: 12px; }
+    .lead-card-head { display: grid; grid-template-columns: 112px 1fr auto; gap: 12px; align-items: start; }
+    .lead-score b { display: block; margin-bottom: 6px; }
+    .lead-main { display: grid; gap: 6px; min-width: 0; }
+    .lead-main h3 { margin: 0; font-size: 15px; line-height: 1.4; }
+    .lead-meta { display: flex; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
+    .lead-link { white-space: nowrap; font-size: 12px; }
+    .lead-body { display: grid; grid-template-columns: 1.1fr .9fr; gap: 12px; }
+    .lead-block { border: 1px solid var(--line); border-radius: 8px; background: var(--primary-soft); padding: 12px; }
+    .lead-block b { display: block; margin-bottom: 6px; font-size: 12px; color: #374151; }
+    .lead-actions { border-top: 1px solid var(--line); padding-top: 12px; }
+    .modal-mask {
+      position: fixed; inset: 0; background: rgba(15,23,42,.42); display: none; align-items: center; justify-content: center;
+      z-index: 50; padding: 18px;
+    }
+    .modal { width: min(680px, 100%); background: white; border-radius: 8px; box-shadow: 0 18px 40px rgba(15,23,42,.18); border: 1px solid var(--line); }
+    .modal-head { padding: 18px 20px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; }
+    .modal-head h2 { margin: 0; font-size: 18px; }
+    .modal-body { padding: 20px; }
+    .modal-actions { padding: 0 20px 20px; display: flex; gap: 10px; justify-content: flex-end; }
+    .modal-actions button { width: auto; padding: 0 18px; margin: 0; }
+    .btn-secondary { background: #4b5563; }
+    .field-help { margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .gate { padding: 0 38px 42px; display: grid; place-items: start center; }
+    .gate-card { width: min(460px, 100%); padding: 22px; }
+    .gate-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+    .gate-actions button { width: auto; padding: 0 18px; margin: 0; }
+
+    /* Interaction polish: richer neutral palette, clearer states, still quiet and workbench-like. */
+    :root {
+      --bg: #f3f5f7;
+      --card: #ffffff;
+      --surface-soft: #f8faf9;
+      --text: #111318;
+      --muted: #69717d;
+      --line: #dde2e7;
+      --line-strong: #c6ced7;
+      --primary: #111318;
+      --primary-hover: #252932;
+      --accent: #0f6b57;
+      --accent-soft: #e8f4ef;
+      --blue: #315f9f;
+      --blue-soft: #e9f0fb;
+      --shadow: 0 1px 2px rgba(17, 19, 24, .06), 0 8px 24px rgba(17, 19, 24, .04);
+      --shadow-hover: 0 2px 4px rgba(17, 19, 24, .08), 0 12px 28px rgba(17, 19, 24, .07);
+      --focus-ring: 0 0 0 3px rgba(15, 107, 87, .16);
+    }
+    body { background: var(--bg); }
+    header {
+      background: rgba(255,255,255,.72);
+      border-bottom: 1px solid rgba(221,226,231,.75);
+    }
+    h1 .badge {
+      color: #0f4f42;
+      background: var(--accent-soft);
+      border-color: #c8e5da;
+    }
+    .nav-link, .icon-btn {
+      transition: transform .14s ease, background .14s ease, border-color .14s ease, box-shadow .14s ease;
+    }
+    .nav-link:hover, .icon-btn:hover {
+      background: #fbfcfd;
+      border-color: var(--line-strong);
+      box-shadow: var(--shadow);
+      transform: translateY(-1px);
+    }
+    .card { box-shadow: var(--shadow); }
+    .panel, .task-panel, .result-shell, .history-bottom, .gate-card {
+      border-color: #d9e0e7;
+    }
+    .panel { background: #ffffff; }
+    label { color: #242933; }
+    input, select, textarea {
+      background: #fcfdfd;
+      transition: border-color .14s ease, box-shadow .14s ease, background .14s ease;
+    }
+    input:hover, select:hover, textarea:hover { border-color: #aeb8c4; background: #ffffff; }
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--accent);
+      box-shadow: var(--focus-ring);
+    }
+    input[type="checkbox"] { accent-color: var(--accent); }
+    .checks {
+      border-radius: 8px;
+      transition: color .14s ease, background .14s ease;
+    }
+    .checks:hover { color: var(--text); }
+    button, .button-like {
+      transition: transform .12s ease, background .14s ease, border-color .14s ease, box-shadow .14s ease, opacity .14s ease;
+      box-shadow: 0 1px 1px rgba(17,19,24,.06);
+    }
+    button:hover:not(:disabled) {
+      background: var(--primary-hover);
+      box-shadow: var(--shadow-hover);
+      transform: translateY(-1px);
+    }
+    button:active:not(:disabled), button.is-pressing:not(:disabled) {
+      transform: translateY(0) scale(.99);
+      box-shadow: 0 1px 1px rgba(17,19,24,.06);
+    }
+    button:focus-visible, a:focus-visible {
+      outline: none;
+      box-shadow: var(--focus-ring);
+    }
+    button:disabled {
+      filter: grayscale(.15);
+      box-shadow: none;
+    }
+    .btn-secondary, .btn-md {
+      color: var(--text);
+      background: #ffffff;
+      border: 1px solid var(--line-strong);
+    }
+    .btn-secondary:hover:not(:disabled), .btn-md:hover:not(:disabled) {
+      color: var(--text);
+      background: #f7f9fb;
+    }
+    .btn-export { background: var(--accent); }
+    .btn-export:hover:not(:disabled) { background: #0b5848; }
+    .btn-stop { background: var(--red); }
+    .hint {
+      background: #f8faf9;
+      border-color: #dce5e1;
+    }
+    .status {
+      background: #ffffff;
+      border-left: 4px solid var(--accent);
+    }
+    .status-dot {
+      width: 9px;
+      height: 9px;
+      flex: 0 0 auto;
+      border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 0 4px rgba(15,107,87,.12);
+    }
+    .status-running { border-left-color: var(--blue); }
+    .status-running .status-dot { background: var(--blue); box-shadow: 0 0 0 4px rgba(49,95,159,.12); }
+    .status-success { border-left-color: var(--green); }
+    .status-success .status-dot { background: var(--green); box-shadow: 0 0 0 4px rgba(20,101,52,.12); }
+    .status-warning { border-left-color: var(--orange); }
+    .status-warning .status-dot { background: var(--orange); box-shadow: 0 0 0 4px rgba(180,83,9,.12); }
+    .status-error { border-left-color: var(--red); }
+    .status-error .status-dot { background: var(--red); box-shadow: 0 0 0 4px rgba(185,28,28,.12); }
+    .progress { height: 8px; background: #e9edf1; }
+    .progress-fill { background: var(--accent); }
+    .history-item, .lead-card, .kpi, .report-box, .lead-block {
+      transition: transform .14s ease, border-color .14s ease, box-shadow .14s ease, background .14s ease;
+    }
+    .history-item:hover, .lead-card:hover, .kpi:hover {
+      border-color: #bcc8d4;
+      box-shadow: var(--shadow-hover);
+      transform: translateY(-1px);
+    }
+    .kpi {
+      background: var(--surface-soft);
+      border-color: #dfe6ec;
+    }
+    .kpi b { color: var(--text); }
+    .tabs {
+      margin: 0 18px;
+      padding: 5px;
+      gap: 4px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #f1f4f6;
+    }
+    .tab-btn {
+      height: 34px;
+      border-radius: 7px;
+      border: 1px solid transparent;
+      color: #68717c;
+      background: transparent;
+    }
+    .tab-btn:hover:not(:disabled) {
+      color: var(--text);
+      background: rgba(255,255,255,.7);
+      transform: none;
+      box-shadow: none;
+    }
+    .tab-btn.active {
+      color: var(--text);
+      background: #ffffff;
+      border-color: #d9e0e7;
+      box-shadow: 0 1px 2px rgba(17,19,24,.08);
+    }
+    .lead-card { background: #ffffff; }
+    .lead-block {
+      background: #f8faf9;
+      border-color: #dfe7e3;
+    }
+    .lead-block b { color: #33403b; }
+    .pA { background: #fff1f0; color: #a32020; border-color: #f3c4c0; }
+    .pB { background: #fff7e6; color: #895500; border-color: #f0d49a; }
+    .pC { background: var(--blue-soft); color: #244f89; border-color: #c8d7ef; }
+    .pD { background: #eef1f4; color: #4d5662; border-color: #cfd6dd; }
+    .summary {
+      background: #f8faf9;
+      border-color: #dce5e1;
+    }
+    .empty { background: #ffffff; }
+    .modal-mask { background: rgba(18, 22, 30, .48); }
+    .modal { box-shadow: 0 24px 60px rgba(17,19,24,.24); }
+    @media (max-width: 1100px) {
+      main { padding-left: 18px; padding-right: 18px; }
+      header { padding-left: 18px; padding-right: 18px; }
+      .history-bottom { margin-left: 18px; margin-right: 18px; }
+      .config-grid { grid-template-columns: 1fr; }
+      .kpis { grid-template-columns: 1fr 1fr; }
+      .report-grid { grid-template-columns: 1fr; }
+      .event { grid-template-columns: 1fr; gap: 2px; }
+      .lead-card-head, .lead-body { grid-template-columns: 1fr; }
+      .lead-link { white-space: normal; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-row">
+      <h1>开放获客工作台 <span class="badge">需求描述 + AI 线索雷达</span></h1>
+      <div class="nav-actions">
+        <a class="nav-link" href="harness.html">Harness 控制台</a>
+        <span id="salesNav" class="nav-actions">
+          <span id="salesUserLabel" class="nav-user">本地工作台</span>
+          <button id="xhsLoginBtn" class="nav-link" title="小红书登录 / 验证">小红书登录</button>
+        </span>
+      </div>
+    </div>
+    <div class="sub">面向不同团队和行业，只读分析小红书公开笔记与评论。总控 Agent 先理解需求描述，再规划关键词、筛选帖子、识别可人工跟进线索。系统只给线索和建议，不自动触达。</div>
+  </header>
+
+  <div id="xhsLoginModal" class="modal-mask">
+    <div class="modal">
+      <div class="modal-head">
+        <h2>小红书登录 / 验证</h2>
+        <button class="icon-btn" style="box-shadow:none;width:34px;height:34px;font-size:16px;" onclick="closeXhsLogin()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="hint" style="margin-top:0;">
+          本机工作台使用本地小红书登录态。这里不会绕过验证码；如平台要求验证，请按官方页面或扫码流程人工完成。
+        </div>
+        <div class="btn-row" style="margin-top:10px;">
+          <button type="button" onclick="startXhsLogin()">开始小红书登录</button>
+          <button type="button" class="btn-secondary" onclick="confirmXhsLogin()">完成后验证登录态</button>
+          <button type="button" class="btn-secondary" onclick="refreshXhsLoginStatus()">检查登录态</button>
+        </div>
+        <div id="xhsQrBox" class="hint" style="display:none;text-align:center;"></div>
+        <div id="xhsLoginHelp" class="field-help">尚未检查小红书登录态。</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="closeXhsLogin()">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <main id="salesMain">
+    <div id="status" class="card status"><span class="status-dot" aria-hidden="true"></span><span>等待任务。请先确认 xhs 已登录，Windows/macOS 会自动探测 xhs 路径。</span></div>
+
+    <section class="card panel">
+      <div class="panel-head">
+        <div>
+          <h2>配置区</h2>
+          <div class="small">先写清楚要找什么客户，再用种子词辅助搜索。</div>
+        </div>
+        <span class="pill">任务输入</span>
+      </div>
+      <input id="businessDirection" type="hidden" value="cloud_ai" />
+
+      <div class="config-grid">
+        <div>
+          <label for="demandDescription">需求描述 <span class="field-required">*</span></label>
+          <textarea id="demandDescription" required placeholder="例如：找深圳正在做 AI 客服私有化、想降低客服人力成本、或在评论里询问落地方案的潜在线索；也可以输入餐饮加盟、母婴课程、B2B SaaS 试用等任意获客需求。"></textarea>
+          <div class="field-help">必填。这里会作为任务主需求传给后端，用于生成关键词、判断线索和组织日报。</div>
+
+          <label for="keyword">种子词（可选）</label>
+          <input id="keyword" placeholder="例如：AI客服怎么做, 客服外包太贵, 餐饮加盟避坑, CRM试用" />
+
+          <div class="row">
+            <div>
+              <label for="industry">行业</label>
+              <input id="industry" placeholder="例如：电商 / 教育 / 医疗" />
+            </div>
+            <div>
+              <label for="region">地区</label>
+              <input id="region" placeholder="例如：广州 / 深圳" />
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="row">
+            <div>
+              <label for="count">单轮笔记数</label>
+              <input id="count" type="number" min="1" max="20" value="8" />
+            </div>
+            <div>
+              <label for="minScore">线索阈值</label>
+              <input id="minScore" type="number" min="0" max="100" value="60" />
+            </div>
+          </div>
+
+          <div class="row">
+            <div>
+              <label for="metric">排序指标</label>
+              <select id="metric">
+                <option value="engagement">综合互动</option>
+                <option value="liked">点赞</option>
+                <option value="collected">收藏</option>
+                <option value="comments">评论</option>
+                <option value="shared">转发</option>
+              </select>
+            </div>
+            <div>
+              <label for="timeFilter">时效</label>
+              <select id="timeFilter">
+                <option value="all">全部</option>
+                <option value="month">近 1 个月</option>
+                <option value="quarter">近 3 个月</option>
+                <option value="year">近 1 年</option>
+              </select>
+            </div>
+          </div>
+
+          <label>采集延迟（秒）</label>
+          <div class="row">
+            <input id="delayMin" type="number" min="0" max="120" value="7" />
+            <input id="delayMax" type="number" min="0" max="120" value="60" />
+          </div>
+
+          <label class="checks"><input id="readDetail" type="checkbox" checked />读取笔记详情</label>
+          <label class="checks"><input id="scanLeads" type="checkbox" checked />扫描评论识别潜在线索</label>
+
+          <div class="hint">
+            <label class="checks" style="margin-top:0;"><input id="batchMode" type="checkbox" />启用后台多轮扫描</label>
+            <div id="batchFields" style="display:none;">
+              <div class="row">
+                <div>
+                  <label for="batchRounds">轮次</label>
+                  <input id="batchRounds" type="number" min="1" max="10" value="3" />
+                </div>
+                <div>
+                  <label>轮间隔（分钟）</label>
+                  <div class="row">
+                    <input id="intervalMin" type="number" min="1" max="180" value="30" />
+                    <input id="intervalMax" type="number" min="1" max="180" value="60" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <button id="searchBtn">开始扫描线索</button>
+          <button id="stopBtn" class="btn-stop">停止后台任务</button>
+        </div>
+      </div>
+
+      <div class="hint">
+        <b>合规边界：</b>本工具仅执行 status/search/read/comments，只读分析公开内容。遇到验证码、风控、登录过期会停止任务；跟进动作必须由账号使用者人工确认。
+      </div>
+    </section>
+
+    <section class="results">
+      <div id="taskPanel" class="card task-panel">
+        <div class="task-head">
+          <div>
+            <h2>任务进度 <span id="taskIdBadge" class="pill">未启动</span></h2>
+            <div id="taskMeta" class="small">等待后台任务。</div>
+          </div>
+          <div class="btn-row">
+            <button class="btn-secondary" onclick="loadTaskHistory()">刷新历史</button>
+            <button id="panelStopBtn" class="btn-stop" onclick="stopBatch()">停止任务</button>
+          </div>
+        </div>
+        <div class="progress"><div id="taskProgressFill" class="progress-fill"></div></div>
+        <div id="taskProgressText" class="small">暂无进度</div>
+        <div id="taskEvents" class="timeline" style="margin-top:12px;"><div class="small">暂无任务日志</div></div>
+      </div>
+      <div id="output" class="card empty">
+        <div>
+          <p style="font-size:17px;font-weight:800;">线索雷达待启动</p>
+          <p>填写需求描述后开始扫描，系统将输出可跟进线索、日报、来源笔记和执行日志。</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <details id="taskHistory" class="card history-panel history-bottom" style="display:none;">
+    <summary>
+      <span>历史任务</span>
+      <span id="historyCount" class="small">默认折叠</span>
+    </summary>
+    <div id="historyList" class="history-list"><div class="small">暂无历史任务</div></div>
+  </details>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    function displayText(value) {
+      return String(value ?? '')
+        .replaceAll('微闻云', '当前工作台')
+        .replaceAll('内部销售', '使用者')
+        .replaceAll('销售团队', '团队')
+        .replaceAll('销售人员', '使用者');
+    }
+    const esc = (s) => displayText(s).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+    const fmt = (n) => Number(n || 0).toLocaleString('zh-CN');
+    let cachedData = null;
+    let pollTimer = null;
+    let currentTaskId = localStorage.getItem('currentTaskId') || '';
+    let lastTaskEvents = [];
+    const FEEDBACK_LABELS = {
+      valid_lead: '有效线索',
+      invalid_lead: '误判线索',
+      missed_lead: '漏识别线索',
+      wrong_product: '产品匹配不准',
+      bad_outreach: '跟进话术不合适',
+      other: '其他'
+    };
+
+    function wireButtonFeedback() {
+      document.addEventListener('pointerdown', event => {
+        const button = event.target.closest('button');
+        if (!button || button.disabled) return;
+        button.classList.add('is-pressing');
+      });
+      ['pointerup', 'pointercancel', 'pointerleave'].forEach(type => {
+        document.addEventListener(type, event => {
+          const button = event.target.closest('button');
+          if (button) button.classList.remove('is-pressing');
+        });
+      });
+    }
+
+    function apiBase() {
+      return location.protocol === 'file:' ? 'http://127.0.0.1:8765' : '';
+    }
+
+    function showSalesApp() {
+      $('salesMain').style.display = 'grid';
+      $('taskHistory').style.display = 'block';
+      $('salesNav').style.display = 'flex';
+      $('salesUserLabel').textContent = '本地工作台';
+      if (!cachedData) renderPlaceholderResults();
+    }
+
+    async function bootSales() {
+      showSalesApp();
+      await loadConfig();
+      await restoreLastTask();
+    }
+
+    function setStatus(text, icon = '') {
+      const tone = icon === '✅' ? 'success'
+        : icon === '⏳' ? 'running'
+        : icon === '⚠️' ? 'warning'
+        : icon === '❌' ? 'error'
+        : 'idle';
+      $('status').className = `card status status-${tone}`;
+      $('status').innerHTML = `<span class="status-dot" aria-hidden="true"></span><span>${esc(text)}</span>`;
+    }
+
+    function formatTime(ts) {
+      if (!ts) return '-';
+      return new Date(Number(ts) * 1000).toLocaleTimeString('zh-CN', { hour12: false });
+    }
+
+    function taskStatusLabel(status) {
+      return { running:'运行中', completed:'已完成', failed:'失败', stopped:'已停止', interrupted:'已中断' }[status] || status || '未知';
+    }
+
+    function feedbackTypeFromValue(value) {
+      const text = String(value || '');
+      if (FEEDBACK_LABELS[text]) return text;
+      if (['有效', '已跟进', '已成交'].includes(text)) return 'valid_lead';
+      if (text === '无效') return 'invalid_lead';
+      if (text === '产品不准') return 'wrong_product';
+      if (text === '话术不准') return 'bad_outreach';
+      return 'other';
+    }
+
+    function feedbackOptions(selected) {
+      const current = feedbackTypeFromValue(selected);
+      return Object.entries(FEEDBACK_LABELS)
+        .filter(([key]) => key !== 'missed_lead')
+        .map(([key, label]) => `<option value="${key}" ${current === key ? 'selected' : ''}>${label}</option>`)
+        .join('');
+    }
+
+    function renderEventList(events) {
+      return (events || []).length
+        ? events.map(e => `
+            <div class="event event-${esc(e.level || 'info')}">
+              <div class="time">${formatTime(e.createdAt)}</div>
+              <div class="agent">${esc(e.agent || '-')}</div>
+              <div class="msg">${esc(e.message)}</div>
+            </div>
+          `).join('')
+        : '<div class="small">暂无任务日志</div>';
+    }
+
+    function syncResultTaskEvents(events) {
+      const el = $('resultTaskEvents');
+      if (el) el.innerHTML = renderEventList(events);
+    }
+
+    function switchResultTab(tab) {
+      document.querySelectorAll('[data-result-tab]').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.resultTab === tab);
+      });
+      document.querySelectorAll('[data-result-panel]').forEach(panel => {
+        panel.hidden = panel.dataset.resultPanel !== tab;
+      });
+    }
+
+    function renderPlaceholderResults(
+      title = '线索雷达待启动',
+      detail = '填写需求描述后开始扫描，系统将输出可跟进线索、日报、来源笔记和执行日志。'
+    ) {
+      $('output').className = 'card result-shell';
+      $('output').innerHTML = `
+        <div class="tabs" role="tablist" aria-label="结果 tabs">
+          <button type="button" class="tab-btn active" data-result-tab="leads" onclick="switchResultTab('leads')">线索</button>
+          <button type="button" class="tab-btn" data-result-tab="report" onclick="switchResultTab('report')">日报</button>
+          <button type="button" class="tab-btn" data-result-tab="notes" onclick="switchResultTab('notes')">来源笔记</button>
+          <button type="button" class="tab-btn" data-result-tab="logs" onclick="switchResultTab('logs')">执行日志</button>
+        </div>
+        <div class="tab-panel" data-result-panel="leads">
+          <div class="empty" style="min-height:180px;">
+            <div>
+              <p style="font-size:17px;font-weight:800;">${esc(title)}</p>
+              <p>${esc(detail)}</p>
+            </div>
+          </div>
+        </div>
+        <div class="tab-panel" data-result-panel="report" hidden>
+          <div class="empty" style="min-height:180px;">任务完成后显示获客报告。</div>
+        </div>
+        <div class="tab-panel" data-result-panel="notes" hidden>
+          <div class="empty" style="min-height:180px;">任务完成后显示来源笔记。</div>
+        </div>
+        <div class="tab-panel" data-result-panel="logs" hidden>
+          <div id="resultTaskEvents" class="timeline">${renderEventList(lastTaskEvents)}</div>
+        </div>
+      `;
+    }
+
+    function getDemandDescription(data = cachedData) {
+      return String(
+        data?.demandDescription ||
+        data?.demand_description ||
+        data?.request?.demandDescription ||
+        data?.payload?.demandDescription ||
+        $('demandDescription')?.value?.trim() ||
+        ''
+      ).trim();
+    }
+
+    function taskTitle(task) {
+      const title = String(task?.demandDescription || task?.demand_description || task?.keyword || '无需求描述').trim();
+      return title.length > 76 ? `${title.slice(0, 76)}...` : title;
+    }
+
+    function renderTaskPanel(data) {
+      if (!data || data.hasTask === false) return;
+      $('taskPanel').style.display = 'block';
+      $('taskIdBadge').textContent = `#${data.taskId || data.id} · ${taskStatusLabel(data.status)}`;
+      const progress = data.progress || {};
+      const percent = Math.max(0, Math.min(100, Number(progress.percent || 0)));
+      $('taskProgressFill').style.width = `${percent}%`;
+      const roundText = data.totalRounds ? `第 ${data.currentRound || 0}/${data.totalRounds} 轮 · ` : '';
+      $('taskMeta').textContent = `${roundText}${data.statusText || '等待任务更新'}${data.errorText ? ' · ' + data.errorText : ''}`;
+      $('taskProgressText').textContent = `阶段：${progress.stage || '-'} · 进度：${percent}% · 更新时间：${formatTime(data.updatedAt)}`;
+      const events = data.events || [];
+      lastTaskEvents = events;
+      $('taskEvents').innerHTML = renderEventList(events);
+      syncResultTaskEvents(events);
+      $('stopBtn').style.display = data.isRunning ? 'block' : 'none';
+      $('panelStopBtn').style.display = data.isRunning ? 'inline-block' : 'none';
+    }
+
+    function needsXhsLoginAssist(text) {
+      return /验证码|风控|登录态|Cookie|captcha|verification|login/i.test(String(text || ''));
+    }
+
+    function renderHistory(tasks) {
+      $('taskHistory').style.display = 'block';
+      if ($('historyCount')) {
+        $('historyCount').textContent = `${fmt((tasks || []).length)} 条历史`;
+      }
+      $('historyList').innerHTML = (tasks || []).length
+        ? tasks.map(t => `
+            <div class="history-item">
+              <div>
+                <b>#${fmt(t.id)} · ${esc(taskStatusLabel(t.status))}</b>
+                <div class="small">${esc(taskTitle(t))}</div>
+                <div class="small">种子词：${esc(t.keyword || '无')} · ${esc(t.mode || 'single')} · 笔记 ${fmt(t.notesCount)} · 线索 ${fmt(t.leadsCount)} · 更新 ${formatTime(t.updatedAt)}</div>
+              </div>
+              <button onclick="viewTask(${Number(t.id)})">查看</button>
+            </div>
+          `).join('')
+        : '<div class="small">暂无历史任务</div>';
+    }
+
+    function payload() {
+      const demandDescription = $('demandDescription').value.trim();
+      if (!demandDescription) {
+        $('demandDescription').focus();
+        throw new Error('请先填写需求描述。');
+      }
+      const data = {
+        demandDescription,
+        businessDirection: $('businessDirection')?.value || 'cloud_ai',
+        industry: $('industry').value.trim(),
+        region: $('region').value.trim(),
+        keyword: $('keyword').value.trim(),
+        count: Number($('count').value || 8),
+        minScore: Number($('minScore').value || 60),
+        metric: $('metric').value,
+        timeFilter: $('timeFilter').value,
+        delayMin: Number($('delayMin').value || 7),
+        delayMax: Number($('delayMax').value || 60),
+        readDetail: $('readDetail').checked,
+        scanLeads: $('scanLeads').checked
+      };
+      if ($('batchMode').checked) {
+        data.rounds = Number($('batchRounds').value || 3);
+        data.intervalMin = Number($('intervalMin').value || 30);
+        data.intervalMax = Number($('intervalMax').value || 60);
+      }
+      return data;
+    }
+
+    function render(data) {
+      cachedData = data;
+      const demandDescription = getDemandDescription(data);
+      const seedKeyword = data.keyword || data.request?.keyword || data.payload?.keyword || $('keyword')?.value?.trim() || '';
+      if (cachedData && demandDescription) cachedData.demandDescription = demandDescription;
+      if (cachedData && !cachedData.keyword) cachedData.keyword = seedKeyword;
+
+      const notes = data.notes || [];
+      const leads = data.leads?.leads || [];
+      const aLeads = leads.filter(l => l.priority === 'A').length;
+      const productCount = (data.leads?.productDistribution || data.report?.productDistribution || []).length;
+      const noteRows = notes.map(n => `
+        <tr>
+          <td><span class="pill">#${n.rank || '-'}</span></td>
+          <td><b>${esc(n.title)}</b><div class="small">${esc((n.tags || []).slice(0, 5).join(' / '))}</div></td>
+          <td>${esc(n.author)}</td>
+          <td>${esc(n.publish_date || '未知')}</td>
+          <td class="num">${fmt(n.liked)}</td>
+          <td class="num">${fmt(n.collected)}</td>
+          <td class="num">${fmt(n.comments)}</td>
+          <td class="num">${fmt(n.engagement)}</td>
+          <td><a href="${esc(n.url)}" target="_blank" rel="noopener">打开 ↗</a></td>
+        </tr>
+      `).join('');
+
+      const leadRows = leads.map((l, idx) => {
+        const priority = l.priority || '-';
+        const summary = l.demand_summary || l.evidence || '未提炼需求';
+        const sourceTitle = (l.note_title || '来源笔记').slice(0, 28);
+        return `
+          <article class="lead-card">
+            <div class="lead-card-head">
+              <div class="lead-score">
+                <b><span class="pill p${esc(priority)}">${esc(priority)} / ${fmt(l.score)}</span></b>
+                <div class="small">${esc(l.stage || '未分阶段')}</div>
+              </div>
+              <div class="lead-main">
+                <h3>${esc(summary)}</h3>
+                <div class="lead-meta">
+                  <span>${esc(l.nickname || '未知用户')}</span>
+                  <span>ID: ${esc(l.user_id || '-')}</span>
+                  ${l.ip ? `<span>${esc(l.ip)}</span>` : ''}
+                </div>
+              </div>
+              <a class="lead-link" href="${esc(l.note_url)}" target="_blank" rel="noopener">${esc(sourceTitle)} ↗</a>
+            </div>
+            <div class="lead-body">
+              <div class="lead-block">
+                <b>原文证据</b>
+                <div class="evidence">${esc(l.evidence || '-')}</div>
+              </div>
+              <div class="lead-block">
+                <b>推荐产品</b>
+                <div>${esc(l.recommended_products || '-')}</div>
+                <div class="small">${esc(l.reason || '')}</div>
+              </div>
+              <div class="lead-block">
+                <b>首句话术</b>
+                <div class="copy">${esc(l.outreach_copy || '-')}</div>
+              </div>
+              <div class="lead-block">
+                <b>风险提示</b>
+                <div class="small">${esc(l.risk || '跟进前需人工核验语境。')}</div>
+              </div>
+            </div>
+            <div class="lead-actions feedback-cell">
+              <select id="feedbackType-${idx}">
+                ${feedbackOptions(l.feedback)}
+              </select>
+              <textarea id="feedbackNote-${idx}" placeholder="补充说明，例如为什么有效、哪里误判、产品或话术哪里不准"></textarea>
+              <button type="button" onclick="saveFeedback(${idx})">提交反馈</button>
+              <div id="feedbackStatus-${idx}" class="small">${esc(l.feedback ? '已有人工作业记录：' + l.feedback : '未提交学习反馈')}</div>
+            </div>
+          </article>
+        `;
+      }).join('');
+
+      const report = data.report || {};
+      const insights = (report.insights || []).map(x => `<li>${esc(x)}</li>`).join('');
+      const actions = (report.recommended_actions || []).map(x => `<li>${esc(x)}</li>`).join('');
+      const risks = (report.risks || []).map(x => `<li>${esc(x)}</li>`).join('');
+      const distRows = (data.leads?.productDistribution || report.productDistribution || []).map(p => `<li>${esc(p.label)}：${fmt(p.count)} 条</li>`).join('');
+
+      $('output').className = 'card result-shell';
+      $('output').innerHTML = `
+        <div class="kpis">
+          <div class="kpi"><b>${fmt(notes.length)}</b><span>相关笔记</span></div>
+          <div class="kpi"><b>${fmt(data.leads?.totalCommentsScanned || 0)}</b><span>扫描评论</span></div>
+          <div class="kpi"><b>${fmt(leads.length)}</b><span>达标线索</span></div>
+          <div class="kpi"><b style="color:var(--red)">${fmt(aLeads)}</b><span>A级线索</span></div>
+          <div class="kpi"><b>${fmt(productCount)}</b><span>产品方向</span></div>
+        </div>
+        <div class="tabs" role="tablist" aria-label="结果 tabs">
+          <button type="button" class="tab-btn active" data-result-tab="leads" onclick="switchResultTab('leads')">线索</button>
+          <button type="button" class="tab-btn" data-result-tab="report" onclick="switchResultTab('report')">日报</button>
+          <button type="button" class="tab-btn" data-result-tab="notes" onclick="switchResultTab('notes')">来源笔记</button>
+          <button type="button" class="tab-btn" data-result-tab="logs" onclick="switchResultTab('logs')">执行日志</button>
+        </div>
+        <div class="tab-panel" data-result-panel="leads">
+          <div class="section-title">
+            <h2>可跟进线索</h2>
+            <span class="btn-row">
+              <button class="btn-export" onclick="exportExcel()">导出 Excel</button>
+              <button class="btn-md" onclick="exportMarkdown()">导出 Markdown</button>
+              <button onclick="submitMissedLeadFeedback()">提交漏识别反馈</button>
+            </span>
+          </div>
+          <div class="lead-list">
+            ${leadRows || '<div class="empty" style="min-height:160px;">暂无达到阈值的线索。可降低阈值、补充需求描述或添加种子词。</div>'}
+          </div>
+        </div>
+        <div class="tab-panel" data-result-panel="report" hidden>
+          <div class="section-title">
+            <h2>获客报告</h2>
+            <span class="btn-row">
+              <button class="btn-export" onclick="exportExcel()">导出 Excel</button>
+              <button class="btn-md" onclick="exportMarkdown()">导出 Markdown</button>
+            </span>
+          </div>
+          <div class="summary"><b>需求描述：</b>${esc(demandDescription || '未记录')}<br><b>种子词：</b>${esc(seedKeyword || '未填写')}</div>
+          <div class="summary" style="margin-top:12px;">${esc(report.summary || '暂无报告')}</div>
+          <div class="report-grid" style="margin-top:14px;">
+            <div class="report-box"><h3>核心洞察</h3><ul>${insights || '<li>暂无洞察</li>'}</ul></div>
+            <div class="report-box"><h3>推荐动作</h3><ul>${actions || '<li>暂无动作</li>'}</ul></div>
+            <div class="report-box"><h3>产品分布</h3><ul>${distRows || '<li>暂无产品匹配</li>'}</ul></div>
+            <div class="report-box"><h3>风险提示</h3><ul>${risks || '<li>销售跟进前需人工核验语境。</li>'}</ul></div>
+          </div>
+        </div>
+        <div class="tab-panel" data-result-panel="notes" hidden>
+          <div class="section-title"><h2>来源笔记</h2></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>排名</th><th>标题</th><th>作者</th><th>日期</th><th>赞</th><th>藏</th><th>评</th><th>综合</th><th>链接</th></tr></thead>
+              <tbody>${noteRows || '<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:36px;">暂无相关笔记。</td></tr>'}</tbody>
+            </table>
+          </div>
+        </div>
+        <div class="tab-panel" data-result-panel="logs" hidden>
+          <div class="section-title"><h2>执行日志</h2></div>
+          <div id="resultTaskEvents" class="timeline">${renderEventList(lastTaskEvents)}</div>
+        </div>
+      `;
+    }
+
+    async function search() {
+      const btn = $('searchBtn');
+      let body;
+      try {
+        body = payload();
+      } catch (err) {
+        alert(err.message || err);
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = '正在启动...';
+      renderPlaceholderResults('后台任务启动中...', '任务启动后会在任务进度与执行日志中展示每一步，刷新页面也可找回。');
+      try {
+        body.mode = $('batchMode').checked ? 'batch' : 'single';
+        body.batchMode = $('batchMode').checked;
+        setStatus('正在创建后台任务...', '⏳');
+        const res = await fetch(`${apiBase()}/api/tasks/start`, { method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+        const json = await res.json();
+        if (!json.ok) throw new Error(json.error || '启动任务失败');
+        const data = json.data;
+        if (data.ok === false) throw new Error(data.error || '启动任务失败');
+        currentTaskId = data.taskId;
+        localStorage.setItem('currentTaskId', currentTaskId);
+        renderTaskPanel(data);
+        setStatus(`任务 #${currentTaskId} 已启动，正在轮询执行日志...`, '⏳');
+        btn.textContent = '任务运行中';
+        $('stopBtn').style.display = 'block';
+        startPolling(currentTaskId);
+        loadTaskHistory();
+      } catch (err) {
+        $('output').className = 'card section';
+        $('output').innerHTML = `<div style="color:var(--red);"><b>执行失败</b><br>${esc(err.message || err)}</div>`;
+        setStatus('执行失败，请检查 xhs 登录态、验证码或配置。', '❌');
+        btn.disabled = false;
+        btn.textContent = '开始扫描线索';
+      }
+    }
+
+    function startPolling(taskId = currentTaskId) {
+      if (pollTimer) clearInterval(pollTimer);
+      if (!taskId) return;
+      pollStatus(taskId);
+      pollTimer = setInterval(() => pollStatus(taskId), 2000);
+    }
+
+    async function pollStatus(taskId = currentTaskId) {
+      try {
+        const res = await fetch(`${apiBase()}/api/tasks/status`, {
+          method:'POST',
+          credentials:'same-origin',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ taskId })
+        });
+        const json = await res.json();
+        if (!json.ok) throw new Error(json.error || '读取任务状态失败');
+        const data = json.data;
+        if (!data || data.ok === false || data.hasTask === false) {
+          setStatus('没有找到可恢复的任务。', '📢');
+          return;
+        }
+        renderTaskPanel(data);
+        const result = data.result || {};
+        if ((result.notes || []).length || result.report) render(result);
+        const round = data.totalRounds ? `[第 ${data.currentRound}/${data.totalRounds} 轮] ` : '';
+        const statusMessage = `${round}${data.statusText || taskStatusLabel(data.status)}`;
+        if (!data.isRunning && needsXhsLoginAssist(data.errorText || data.statusText)) {
+          setStatus(`${statusMessage}。可点右上角使用“小红书登录/验证助手”。`, '❌');
+        } else {
+          setStatus(statusMessage, data.errorText || data.status === 'failed' ? '❌' : (data.isRunning ? '⏳' : '✅'));
+        }
+        if (!data.isRunning) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+          $('searchBtn').disabled = false;
+          $('searchBtn').textContent = '开始扫描线索';
+          $('stopBtn').style.display = 'none';
+          $('panelStopBtn').style.display = 'none';
+          loadTaskHistory();
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function stopBatch() {
+      await fetch(`${apiBase()}/api/tasks/stop`, {
+        method:'POST',
+        credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ taskId: currentTaskId })
+      });
+      setStatus('已发送停止信号，当前步骤结束后停止。', '⏳');
+      if (currentTaskId) pollStatus(currentTaskId);
+    }
+
+    async function saveFeedback(index) {
+      const lead = cachedData?.leads?.leads?.[index];
+      if (!lead) return alert('找不到该线索数据');
+      const feedbackType = $(`feedbackType-${index}`).value;
+      const userNote = $(`feedbackNote-${index}`).value.trim();
+      const feedback = FEEDBACK_LABELS[feedbackType] || '其他';
+      try {
+        const res = await fetch(`${apiBase()}/api/feedback`, {
+          method:'POST',
+          credentials:'same-origin',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({
+            taskId: currentTaskId,
+            leadId: lead.lead_id,
+            commentId: lead.comment_id,
+            feedbackType,
+            feedback,
+            userNote,
+            evidence: lead.evidence || lead.content || '',
+            expectedResult: feedbackType === 'valid_lead'
+              ? '类似评论应保持为可跟进线索，并保留原文证据。'
+              : ''
+          })
+        });
+        const json = await res.json();
+        if (!json.ok) throw new Error(json.error || '反馈保存失败');
+        lead.feedback = feedback;
+        $(`feedbackStatus-${index}`).textContent = `已提交反馈 #${json.data?.feedbackId || '-'}，待 Harness 分析`;
+        $(`feedbackStatus-${index}`).style.color = 'var(--green)';
+      } catch (err) {
+        alert('反馈保存失败：' + err.message);
+      }
+    }
+
+    async function submitMissedLeadFeedback() {
+      if (!currentTaskId) return alert('请先选择或运行一个任务，再提交漏识别反馈。');
+      const evidence = prompt('粘贴未被识别为线索的评论原文，例如：怎么联系、怎么卖、有报价吗');
+      if (!evidence || !evidence.trim()) return;
+      const userNote = prompt('补充说明，可填写来源笔记标题/链接、你期望它如何展示为线索（可留空）') || '';
+      try {
+        const res = await fetch(`${apiBase()}/api/feedback`, {
+          method:'POST',
+          credentials:'same-origin',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({
+            taskId: currentTaskId,
+            feedbackType: 'missed_lead',
+            feedback: '漏识别线索',
+            userNote,
+            evidence: evidence.trim(),
+            expectedResult: '类似评论应识别为可跟进线索，并说明需求阶段与证据。'
+          })
+        });
+        const json = await res.json();
+        if (!json.ok) throw new Error(json.error || '反馈提交失败');
+        setStatus(`漏识别反馈 #${json.data?.feedbackId || '-'} 已提交，可到 Harness 控制台进行 AI 分析。`, '✅');
+      } catch (err) {
+        alert('漏识别反馈提交失败：' + err.message);
+      }
+    }
+
+    function exportExcel() {
+      if (!cachedData) return alert('暂无可导出数据');
+      const wb = XLSX.utils.book_new();
+      const leads = cachedData.leads?.leads || [];
+      const notes = cachedData.notes || [];
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(leads.map(l => ({
+        评分: l.score, 优先级: l.priority, 阶段: l.stage, 昵称: l.nickname, 用户ID: l.user_id,
+        原文证据: l.evidence, 需求摘要: l.demand_summary, 推荐产品: l.recommended_products,
+        跟进话术: l.outreach_copy, 风险提示: l.risk, 来源笔记: l.note_title, 来源链接: l.note_url, 反馈: l.feedback
+      }))), '可跟进线索');
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(notes.map(n => ({
+        排名: n.rank, 标题: n.title, 作者: n.author, 日期: n.publish_date, 点赞: n.liked, 收藏: n.collected, 评论: n.comments, 综合互动: n.engagement, 链接: n.url
+      }))), '来源笔记');
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cachedData.leads?.productDistribution || []), '产品分布');
+      XLSX.writeFile(wb, `获客线索_${new Date().toISOString().slice(0,10)}.xlsx`);
+    }
+
+    function exportMarkdown() {
+      if (!cachedData) return alert('暂无可导出数据');
+      const report = cachedData.report || {};
+      const leads = cachedData.leads?.leads || [];
+      const demandDescription = getDemandDescription(cachedData);
+      const seedKeyword = cachedData.keyword || cachedData.request?.keyword || cachedData.payload?.keyword || $('keyword')?.value?.trim() || '';
+      const lines = [
+        '# 获客报告',
+        '',
+        `- 需求描述：${demandDescription || '未记录'}`,
+        `- 种子词：${seedKeyword || '未填写'}`,
+        `- 相关笔记：${cachedData.notes?.length || 0}`,
+        `- 达标线索：${leads.length}`,
+        '',
+        '## 摘要',
+        report.summary || '',
+        '',
+        '## Top 线索',
+        ...leads.slice(0, 10).map((l, i) => `${i + 1}. [${l.priority}/${l.score}] ${l.demand_summary}\\n   - 证据：${l.evidence}\\n   - 产品：${l.recommended_products}\\n   - 话术：${l.outreach_copy}\\n   - 来源：${l.note_url}`),
+        '',
+        '## 风险提示',
+        ...((report.risks || ['销售跟进前需人工核验语境。']).map(x => `- ${x}`))
+      ];
+      const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `获客报告_${new Date().toISOString().slice(0,10)}.md`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    async function loadConfig() {
+      try {
+        const res = await fetch(`${apiBase()}/api/config`);
+        const json = await res.json();
+        if (!json.ok) return;
+        const firstDirection = json.data?.businessDirections?.[0]?.value;
+        if (firstDirection && !$('businessDirection').value) $('businessDirection').value = firstDirection;
+      } catch {}
+    }
+
+    async function loadTaskHistory() {
+      try {
+        const res = await fetch(`${apiBase()}/api/tasks/list`, {
+          method:'POST',
+          credentials:'same-origin',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ limit: 20 })
+        });
+        const json = await res.json();
+        if (!json.ok) return;
+        const data = json.data || {};
+        renderHistory(data.tasks || data.data?.tasks || []);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function viewTask(taskId) {
+      currentTaskId = String(taskId);
+      localStorage.setItem('currentTaskId', currentTaskId);
+      await pollStatus(currentTaskId);
+      const data = await fetchTaskStatus(currentTaskId);
+      if (data?.isRunning) startPolling(currentTaskId);
+    }
+
+    async function fetchTaskStatus(taskId) {
+      const res = await fetch(`${apiBase()}/api/tasks/status`, {
+        method:'POST',
+        credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ taskId })
+      });
+      const json = await res.json();
+      if (!json.ok || json.data?.ok === false) return null;
+      return json.data;
+    }
+
+    async function restoreLastTask() {
+      await loadTaskHistory();
+      if (!currentTaskId) return;
+      const data = await fetchTaskStatus(currentTaskId);
+      if (!data || data.hasTask === false) return;
+      renderTaskPanel(data);
+      if (data.result && ((data.result.notes || []).length || data.result.report)) render(data.result);
+      setStatus(`已恢复任务 #${currentTaskId}：${data.statusText || taskStatusLabel(data.status)}`, data.isRunning ? '⏳' : '✅');
+      if (data.isRunning) {
+        $('searchBtn').disabled = true;
+        $('searchBtn').textContent = '任务运行中';
+        $('stopBtn').style.display = 'block';
+        startPolling(currentTaskId);
+      }
+    }
+
+    async function openXhsLogin() {
+      $('xhsLoginModal').style.display = 'flex';
+      await refreshXhsLoginStatus();
+    }
+
+    function closeXhsLogin() {
+      $('xhsLoginModal').style.display = 'none';
+    }
+
+    function setXhsLoginHelp(text, ok = null) {
+      const el = $('xhsLoginHelp');
+      if (!el) return;
+      el.textContent = text;
+      el.style.color = ok === true ? 'var(--green)' : (ok === false ? 'var(--red)' : 'var(--muted)');
+    }
+
+    function renderXhsQr(data) {
+      const box = $('xhsQrBox');
+      if (!box) return;
+      const qrUrl = data?.qrUrl || data?.qr_url || data?.url || '';
+      const qrImage = data?.qrImage || data?.qr_image || '';
+      if (!qrUrl && !qrImage) {
+        box.style.display = 'none';
+        box.innerHTML = '';
+        return;
+      }
+      box.style.display = 'block';
+      box.innerHTML = `
+        ${qrImage ? `<img src="${esc(qrImage)}" alt="小红书登录二维码" style="width:220px;max-width:100%;border:1px solid var(--line);border-radius:8px;background:white;padding:8px;" />` : ''}
+        ${qrUrl ? `<div class="field-help" style="word-break:break-all;">${esc(qrUrl)}</div>` : ''}
+      `;
+    }
+
+    async function startXhsLogin() {
+      setXhsLoginHelp('正在创建小红书登录会话...', null);
+      try {
+        const res = await fetch(`${apiBase()}/api/xhs_login/start`, { method:'POST', credentials:'same-origin' });
+        const json = await res.json();
+        if (!json.ok) throw new Error(json.error || '创建登录会话失败');
+        const data = json.data || {};
+        renderXhsQr(data);
+        setXhsLoginHelp(`${data.message || '登录会话已创建'} 请按页面提示完成扫码或官方验证。`, true);
+      } catch (err) {
+        setXhsLoginHelp(`打开失败：${err.message || err}`, false);
+      }
+    }
+
+    async function confirmXhsLogin() {
+      setXhsLoginHelp('正在确认登录会话并安全写入 Cookie，不会回显 Cookie 值...', null);
+      try {
+        const res = await fetch(`${apiBase()}/api/xhs_login/confirm`, { method:'POST', credentials:'same-origin' });
+        const json = await res.json();
+        if (!json.ok) throw new Error(json.error || '写入 Cookie 失败');
+        const xhs = json.data?.xhs;
+        const user = xhs?.data?.user || {};
+        if (xhs?.data?.authenticated) {
+          setXhsLoginHelp(`登录态已写入并验证成功：${user.nickname || user.name || user.id || '已登录账号'}。可以重新启动扫描。`, true);
+          setStatus('小红书登录态已更新，可以重新启动扫描。', '✅');
+        } else {
+          setXhsLoginHelp('Cookie 已尝试写入，但 xhs-cli 仍未确认登录。请完成扫码确认或官方验证后再点一次。', false);
+        }
+      } catch (err) {
+        setXhsLoginHelp(`确认失败：${err.message || err}`, false);
+      }
+    }
+
+    async function refreshXhsLoginStatus() {
+      setXhsLoginHelp('正在检查小红书登录态...', null);
+      try {
+        const res = await fetch(`${apiBase()}/api/xhs_login/status`, { method:'POST', credentials:'same-origin' });
+        const json = await res.json();
+        if (!json.ok) throw new Error(json.error || '检查失败');
+        const xhs = json.data?.xhs;
+        const helper = json.data?.helper || {};
+        if (xhs?.data?.authenticated) {
+          const user = xhs.data.user || {};
+          setXhsLoginHelp(`当前已登录：${user.nickname || user.name || user.id || '小红书账号'}。登录会话状态：${helper.status || '未启动'}。`, true);
+        } else {
+          setXhsLoginHelp(`当前未确认登录。登录会话状态：${helper.status || '未启动'}。${json.data?.xhsError || ''}`, false);
+        }
+      } catch (err) {
+        setXhsLoginHelp(`检查失败：${err.message || err}`, false);
+      }
+    }
+
+    $('searchBtn').addEventListener('click', search);
+    $('stopBtn').addEventListener('click', stopBatch);
+    $('xhsLoginBtn').addEventListener('click', openXhsLogin);
+    $('xhsLoginModal').addEventListener('click', e => { if (e.target.id === 'xhsLoginModal') closeXhsLogin(); });
+    $('batchMode').addEventListener('change', e => { $('batchFields').style.display = e.target.checked ? 'block' : 'none'; });
+    wireButtonFeedback();
+    window.addEventListener('DOMContentLoaded', bootSales);
+  </script>
+</body>
+</html>
