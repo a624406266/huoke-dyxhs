@@ -133,6 +133,18 @@ def get_login_helper(sales_user_id: int) -> XhsLoginHelper:
     return helper
 
 
+def xhs_login_status_payload(sales_user_id: int) -> dict[str, Any]:
+    helper_data = get_login_helper(sales_user_id).status()
+    helper_mode = str(helper_data.get("mode") or "")
+    helper_status = str(helper_data.get("status") or "")
+    if helper_mode == "qrcode" and helper_status in {"waiting", "scanned", "confirmed", "expired", "error"}:
+        return {"helper": helper_data}
+    try:
+        return {"helper": helper_data, "xhs": get_adapter(sales_user_id).status()}
+    except Exception as exc:
+        return {"helper": helper_data, "xhsError": str(exc)}
+
+
 def get_registry() -> PromptRegistry:
     registry = PromptRegistry(STORAGE)
     registry.ensure_defaults()
@@ -567,11 +579,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.respond_json({"ok": True, "data": task_manager.list_tasks(sales_user_id=LOCAL_SALES_USER_ID)})
             return
         if path == "/api/xhs_login/status":
-            try:
-                self.respond_json({"ok": True, "data": {"helper": get_login_helper(LOCAL_SALES_USER_ID).status(), "xhs": get_adapter(LOCAL_SALES_USER_ID).status()}})
-            except Exception as exc:
-                helper_data = get_login_helper(LOCAL_SALES_USER_ID).status()
-                self.respond_json({"ok": True, "data": {"helper": helper_data, "xhsError": str(exc)}})
+            self.respond_json({"ok": True, "data": xhs_login_status_payload(LOCAL_SALES_USER_ID)})
             return
         super().do_GET()
 
@@ -666,10 +674,7 @@ class Handler(SimpleHTTPRequestHandler):
             elif path == "/api/xhs_login/start":
                 result = get_login_helper(int(sales_user_id or 0)).start()
             elif path == "/api/xhs_login/status":
-                try:
-                    result = {"helper": get_login_helper(int(sales_user_id or 0)).status(), "xhs": get_adapter(sales_user_id).status()}
-                except Exception as exc:
-                    result = {"helper": get_login_helper(int(sales_user_id or 0)).status(), "xhsError": str(exc)}
+                result = xhs_login_status_payload(int(sales_user_id or 0))
             elif path == "/api/xhs_login/confirm":
                 exported = get_login_helper(int(sales_user_id or 0)).confirm()
                 result = {"exported": exported, "xhs": get_adapter(sales_user_id).status()}

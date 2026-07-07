@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -166,6 +167,18 @@ class ServerAuthTests(unittest.TestCase):
         status, body = self.request("POST", "/api/setup/admin", {"username": "admin2", "password": "another-secret"})
         self.assertEqual(status, 409)
         self.assertFalse(body["ok"])
+
+    def test_qr_waiting_status_does_not_probe_xhs_cli(self) -> None:
+        class FakeQrHelper:
+            def status(self) -> dict[str, Any]:
+                return {"mode": "qrcode", "status": "waiting", "message": "等待扫码。"}
+
+        self.server.LOGIN_HELPERS[self.server.LOCAL_SALES_USER_ID] = FakeQrHelper()
+        with patch.object(self.server, "get_adapter", side_effect=AssertionError("xhs status should not be called")):
+            payload = self.server.xhs_login_status_payload(self.server.LOCAL_SALES_USER_ID)
+        self.assertEqual(payload["helper"]["status"], "waiting")
+        self.assertNotIn("xhs", payload)
+        self.assertNotIn("xhsError", payload)
 
     def test_harness_routes_require_admin_session(self) -> None:
         status, body = self.request("GET", "/api/agents")

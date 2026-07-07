@@ -557,6 +557,7 @@
     const fmt = (n) => Number(n || 0).toLocaleString('zh-CN');
     let cachedData = null;
     let pollTimer = null;
+    let xhsLoginPollTimer = null;
     let currentTaskId = localStorage.getItem('currentTaskId') || '';
     let lastTaskEvents = [];
     const FEEDBACK_LABELS = {
@@ -1199,6 +1200,7 @@
 
     function closeXhsLogin() {
       $('xhsLoginModal').style.display = 'none';
+      stopXhsLoginPolling();
     }
 
     function setXhsLoginHelp(text, ok = null) {
@@ -1225,6 +1227,65 @@
       `;
     }
 
+    function stopXhsLoginPolling() {
+      if (!xhsLoginPollTimer) return;
+      clearInterval(xhsLoginPollTimer);
+      xhsLoginPollTimer = null;
+    }
+
+    function startXhsLoginPolling() {
+      if (xhsLoginPollTimer) return;
+      xhsLoginPollTimer = setInterval(() => {
+        if ($('xhsLoginModal').style.display !== 'flex') {
+          stopXhsLoginPolling();
+          return;
+        }
+        refreshXhsLoginStatus({ silent: true });
+      }, 2500);
+    }
+
+    function renderXhsLoginState(data) {
+      const helper = data?.helper || {};
+      const xhs = data?.xhs;
+      const status = helper.status || '';
+      renderXhsQr(helper);
+      if (xhs?.data?.authenticated) {
+        const user = xhs.data.user || {};
+        stopXhsLoginPolling();
+        setXhsLoginHelp(`当前已登录：${user.nickname || user.name || user.id || '小红书账号'}。`, true);
+        return;
+      }
+      if (helper.mode === 'qrcode') {
+        if (status === 'confirmed') {
+          stopXhsLoginPolling();
+          setXhsLoginHelp(helper.message || '手机端已确认，请点击“完成后验证登录态”写入本地 Cookie。', true);
+          return;
+        }
+        if (status === 'scanned') {
+          startXhsLoginPolling();
+          setXhsLoginHelp(helper.message || '已扫码，请在手机小红书中确认登录。', null);
+          return;
+        }
+        if (status === 'waiting') {
+          startXhsLoginPolling();
+          setXhsLoginHelp(helper.message || '等待扫码。请使用小红书 App 扫描二维码。', null);
+          return;
+        }
+        if (status === 'expired') {
+          stopXhsLoginPolling();
+          setXhsLoginHelp(helper.message || '二维码已过期，请重新创建。', false);
+          return;
+        }
+        if (status === 'error') {
+          stopXhsLoginPolling();
+          setXhsLoginHelp(helper.message || '二维码状态检查失败，请重新创建。', false);
+          return;
+        }
+      }
+      stopXhsLoginPolling();
+      setXhsLoginHelp(`当前未确认登录。${data?.xhsError || '请创建二维码登录会话，或确认本机 xhs-cli 已登录。'}`, false);
+    }
+
     async function startXhsLogin() {
       setXhsLoginHelp('正在创建小红书登录会话...', null);
       try {
@@ -1232,9 +1293,9 @@
         const json = await res.json();
         if (!json.ok) throw new Error(json.error || '创建登录会话失败');
         const data = json.data || {};
-        renderXhsQr(data);
-        setXhsLoginHelp(`${data.message || '登录会话已创建'} 请按页面提示完成扫码或官方验证。`, true);
+        renderXhsLoginState({ helper: data });
       } catch (err) {
+        stopXhsLoginPolling();
         setXhsLoginHelp(`打开失败：${err.message || err}`, false);
       }
     }
@@ -1242,12 +1303,21 @@
     async function confirmXhsLogin() {
       setXhsLoginHelp('正在确认登录会话并安全写入 Cookie，不会回显 Cookie 值...', null);
       try {
+        const statusRes = await fetch(`${apiBase()}/api/xhs_login/status`, { method:'POST', credentials:'same-origin' });
+        const statusJson = await statusRes.json();
+        if (!statusJson.ok) throw new Error(statusJson.error || '检查登录会话失败');
+        const helper = statusJson.data?.helper || {};
+        if (helper.mode === 'qrcode' && ['waiting', 'scanned', 'expired', 'error'].includes(helper.status || '')) {
+          renderXhsLoginState(statusJson.data || {});
+          return;
+        }
         const res = await fetch(`${apiBase()}/api/xhs_login/confirm`, { method:'POST', credentials:'same-origin' });
         const json = await res.json();
         if (!json.ok) throw new Error(json.error || '写入 Cookie 失败');
         const xhs = json.data?.xhs;
         const user = xhs?.data?.user || {};
         if (xhs?.data?.authenticated) {
+          stopXhsLoginPolling();
           setXhsLoginHelp(`登录态已写入并验证成功：${user.nickname || user.name || user.id || '已登录账号'}。可以重新启动扫描。`, true);
           setStatus('小红书登录态已更新，可以重新启动扫描。', '✅');
         } else {
@@ -1258,21 +1328,15 @@
       }
     }
 
-    async function refreshXhsLoginStatus() {
-      setXhsLoginHelp('正在检查小红书登录态...', null);
+    async function refreshXhsLoginStatus(options = {}) {
+      if (!options.silent) setXhsLoginHelp('正在检查小红书登录态...', null);
       try {
         const res = await fetch(`${apiBase()}/api/xhs_login/status`, { method:'POST', credentials:'same-origin' });
         const json = await res.json();
         if (!json.ok) throw new Error(json.error || '检查失败');
-        const xhs = json.data?.xhs;
-        const helper = json.data?.helper || {};
-        if (xhs?.data?.authenticated) {
-          const user = xhs.data.user || {};
-          setXhsLoginHelp(`当前已登录：${user.nickname || user.name || user.id || '小红书账号'}。登录会话状态：${helper.status || '未启动'}。`, true);
-        } else {
-          setXhsLoginHelp(`当前未确认登录。登录会话状态：${helper.status || '未启动'}。${json.data?.xhsError || ''}`, false);
-        }
+        renderXhsLoginState(json.data || {});
       } catch (err) {
+        stopXhsLoginPolling();
         setXhsLoginHelp(`检查失败：${err.message || err}`, false);
       }
     }
