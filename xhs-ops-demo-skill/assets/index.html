@@ -392,7 +392,8 @@
           本机工作台使用本地小红书登录态。这里不会绕过验证码；如平台要求验证，请按官方页面或扫码流程人工完成。
         </div>
         <div class="btn-row" style="margin-top:10px;">
-          <button type="button" onclick="startXhsLogin()">开始小红书登录</button>
+          <button type="button" onclick="startXhsLogin()">开始扫码登录</button>
+          <button type="button" class="btn-secondary" onclick="startXhsBrowserLogin()">打开网页登录/验证</button>
           <button type="button" class="btn-secondary" onclick="confirmXhsLogin()">完成后验证登录态</button>
           <button type="button" class="btn-secondary" onclick="refreshXhsLoginStatus()">检查登录态</button>
         </div>
@@ -1282,14 +1283,24 @@
           return;
         }
       }
+      if (helper.mode === 'browser') {
+        stopXhsLoginPolling();
+        setXhsLoginHelp(helper.message || '网页登录/验证窗口已打开。请在 Chrome 中完成登录或验证码验证后，再点击“完成后验证登录态”。', null);
+        return;
+      }
       stopXhsLoginPolling();
       setXhsLoginHelp(`当前未确认登录。${data?.xhsError || '请创建二维码登录会话，或确认本机 xhs-cli 已登录。'}`, false);
     }
 
-    async function startXhsLogin() {
-      setXhsLoginHelp('正在创建小红书登录会话...', null);
+    async function startXhsLogin(mode = 'qrcode') {
+      setXhsLoginHelp(mode === 'browser' ? '正在打开小红书网页登录/验证窗口...' : '正在创建小红书登录会话...', null);
       try {
-        const res = await fetch(`${apiBase()}/api/xhs_login/start`, { method:'POST', credentials:'same-origin' });
+        const res = await fetch(`${apiBase()}/api/xhs_login/start`, {
+          method:'POST',
+          credentials:'same-origin',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ mode })
+        });
         const json = await res.json();
         if (!json.ok) throw new Error(json.error || '创建登录会话失败');
         const data = json.data || {};
@@ -1298,6 +1309,10 @@
         stopXhsLoginPolling();
         setXhsLoginHelp(`打开失败：${err.message || err}`, false);
       }
+    }
+
+    function startXhsBrowserLogin() {
+      return startXhsLogin('browser');
     }
 
     async function confirmXhsLogin() {
@@ -1324,7 +1339,12 @@
           setXhsLoginHelp('Cookie 已尝试写入，但 xhs-cli 仍未确认登录。请完成扫码确认或官方验证后再点一次。', false);
         }
       } catch (err) {
-        setXhsLoginHelp(`确认失败：${err.message || err}`, false);
+        const message = String(err.message || err);
+        if (/Captcha required|验证码|验证|captcha/i.test(message)) {
+          setXhsLoginHelp(`确认失败：小红书要求继续完成网页登录/验证码验证。请点击“打开网页登录/验证”，在 Chrome 中完成验证后，再点“完成后验证登录态”。${message ? ` 原始错误：${message}` : ''}`, false);
+        } else {
+          setXhsLoginHelp(`确认失败：${message}`, false);
+        }
       }
     }
 

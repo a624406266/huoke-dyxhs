@@ -672,7 +672,8 @@ class Handler(SimpleHTTPRequestHandler):
             elif path == "/api/tasks/stop":
                 result = task_manager.stop_task(self.task_id_from_payload(payload), sales_user_id=sales_user_id)
             elif path == "/api/xhs_login/start":
-                result = get_login_helper(int(sales_user_id or 0)).start()
+                login_mode = str(payload.get("mode") or "").strip().lower()
+                result = get_login_helper(int(sales_user_id or 0)).start(mode=login_mode or None)
             elif path == "/api/xhs_login/status":
                 result = xhs_login_status_payload(int(sales_user_id or 0))
             elif path == "/api/xhs_login/confirm":

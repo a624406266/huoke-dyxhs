@@ -180,6 +180,16 @@ class ServerAuthTests(unittest.TestCase):
         self.assertNotIn("xhs", payload)
         self.assertNotIn("xhsError", payload)
 
+    def test_xhs_login_start_accepts_browser_mode(self) -> None:
+        class FakeModeHelper:
+            def start(self, mode: str | None = None) -> dict[str, Any]:
+                return {"mode": mode or "qrcode", "status": "running"}
+
+        self.server.LOGIN_HELPERS[self.server.LOCAL_SALES_USER_ID] = FakeModeHelper()
+        status, body = self.request("POST", "/api/xhs_login/start", {"mode": "browser"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["data"]["mode"], "browser")
+
     def test_harness_routes_require_admin_session(self) -> None:
         status, body = self.request("GET", "/api/agents")
         self.assertEqual(status, 401)

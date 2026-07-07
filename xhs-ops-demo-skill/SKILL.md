@@ -111,6 +111,6 @@ http://127.0.0.1:8765/index.html
    - `.runtime/.venv` 是否完成依赖安装
    - `XHS_BIN` 是否可解析
    - `xhs status` 是否已登录
-   - 是否触发验证码或风控
+   - 是否触发验证码或风控；遇到 `Captcha required` 时，引导用户点击页面里的“打开网页登录/验证”，在 Chrome 中完成官方验证后再确认登录态
    - `LLM_API_KEY` 是否配置
    - 端口是否被占用

@@ -89,8 +89,8 @@ class XhsLoginHelper:
         self.qr_client: Any | None = None
         self.qr_session: dict[str, Any] = {}
 
-    def start(self) -> dict[str, Any]:
-        login_mode = str(os.environ.get("XHS_LOGIN_MODE") or "qrcode").strip().lower()
+    def start(self, mode: str | None = None) -> dict[str, Any]:
+        login_mode = str(mode or os.environ.get("XHS_LOGIN_MODE") or "qrcode").strip().lower()
         if login_mode != "browser":
             return self._start_qrcode()
         return self._start_browser()
@@ -200,12 +200,24 @@ class XhsLoginHelper:
             confirmed_user_id = str(status_data.get("userId") or "").strip()
             if not confirmed_user_id:
                 raise RuntimeError("二维码已确认，但未返回用户 ID，请重新创建二维码。")
-            completion_data = _complete_confirmed_session(
-                self.qr_client,
-                self.qr_session["qr_id"],
-                self.qr_session["code"],
-                confirmed_user_id,
-            )
+            try:
+                completion_data = _complete_confirmed_session(
+                    self.qr_client,
+                    self.qr_session["qr_id"],
+                    self.qr_session["code"],
+                    confirmed_user_id,
+                )
+            except Exception as exc:
+                error_text = str(exc)
+                if "Captcha required" in error_text or "NeedVerify" in type(exc).__name__ or "验证码" in error_text:
+                    self._close_qr_client_locked()
+                    self.mode = "idle"
+                    raise RuntimeError(
+                        "手机端已确认扫码，但小红书要求继续完成网页登录/验证码验证。"
+                        "请点击“打开网页登录/验证”，在打开的 Chrome 窗口完成验证后，再点击“完成后验证登录态”。"
+                        f" 原始错误：{error_text}"
+                    ) from exc
+                raise
             user_id = _resolved_user_id(completion_data) or confirmed_user_id
             cookies = _build_saved_cookies(self.qr_session["a1"], self.qr_session["webid"], self.qr_client.cookies)
             cookie_path = self._save_cookies(cookies)
