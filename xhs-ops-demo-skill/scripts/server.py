@@ -141,7 +141,7 @@ def xhs_login_status_payload(sales_user_id: int) -> dict[str, Any]:
     if helper_mode == "qrcode" and helper_status in {"waiting", "scanned", "confirmed", "expired", "error"}:
         return {"helper": helper_data}
     try:
-        return {"helper": helper_data, "xhs": get_adapter(sales_user_id).status()}
+        return {"helper": helper_data, "xhs": get_adapter(sales_user_id).status(timeout=10)}
     except Exception as exc:
         return {"helper": helper_data, "xhsError": str(exc)}
 

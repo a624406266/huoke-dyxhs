@@ -1,2 +1,4 @@
 xiaohongshu-cli==0.6.4
 qrcode[pil]>=7.4,<8
+click>=8.1,<9
+httpx>=0.27,<1

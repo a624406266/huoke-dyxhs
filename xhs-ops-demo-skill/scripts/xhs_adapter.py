@@ -63,16 +63,25 @@ class XhsAdapter:
                 "USERPROFILE": home,
                 "XDG_CONFIG_HOME": str(self.profile_dir / ".config"),
             })
-        proc = subprocess.run(
-            command,
-            cwd=str(self.root),
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-        )
+        try:
+            proc = subprocess.run(
+                command,
+                cwd=str(self.root),
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            detail = ""
+            if exc.stderr:
+                detail = str(exc.stderr)[-500:]
+            elif exc.stdout:
+                detail = str(exc.stdout)[-500:]
+            suffix = f" 原始输出：{detail}" if detail else ""
+            raise RuntimeError(f"xhs 本地命令超过 {timeout} 秒未返回，请稍后重试，或使用网页登录/验证后再检查登录态。{suffix}") from exc
         if proc.returncode != 0:
             error_text = (proc.stderr or proc.stdout or "xhs command failed").strip()
             raise RuntimeError(self.normalize_error(error_text[-1600:]))
@@ -83,6 +92,12 @@ class XhsAdapter:
 
     def normalize_error(self, text: str) -> str:
         lowered = text.lower()
+        if self._is_local_runtime_error(lowered):
+            return (
+                "本地 xhs-cli 依赖环境异常，请重新运行本地工作台启动器以自动修复依赖。"
+                "这不是小红书账号或 IP 风控问题。"
+                f" 原始错误：{text}"
+            )
         if "cookie refresh failed" in lowered or "using existing cookies" in lowered or "age: 7+ days" in lowered:
             return (
                 "小红书 Cookie 已过期或刷新失败，请先重新登录后再启动扫描。"
@@ -93,12 +108,35 @@ class XhsAdapter:
             return f"小红书触发验证码/风控，请先在浏览器或 xhs login 流程中处理后再重试。原始错误：{text}"
         if "unauth" in lowered or "login" in lowered or "未登录" in text or "登录" in text:
             return f"小红书登录态失效，请先执行 xhs login 或 xhs login --qrcode。原始错误：{text}"
-        if "ip" in lowered or "risk" in lowered or "风控" in text:
+        if self._is_xhs_risk_error(lowered, text):
             return f"小红书接口返回风控/IP异常，请暂停任务并人工检查网络环境。原始错误：{text}"
         return text
 
-    def status(self) -> dict[str, Any]:
-        return self.run(["status", "--json"], timeout=30)
+    def _is_local_runtime_error(self, lowered: str) -> bool:
+        markers = [
+            "traceback (most recent call last)",
+            "modulenotfounderror",
+            "importerror",
+            "attributeerror",
+            "site-packages",
+            "no module named",
+            "has no attribute",
+        ]
+        local_modules = ["click", "httpx", "xhs_cli", "qrcode"]
+        return any(marker in lowered for marker in markers) and any(module in lowered for module in local_modules)
+
+    def _is_xhs_risk_error(self, lowered: str, text: str) -> bool:
+        return (
+            "risk" in lowered
+            or "ip blocked" in lowered
+            or "ip异常" in lowered
+            or "ip 异常" in lowered
+            or "网络异常" in text
+            or "风控" in text
+        )
+
+    def status(self, timeout: int = 30) -> dict[str, Any]:
+        return self.run(["status", "--json"], timeout=timeout)
 
     def ensure_authenticated(self) -> None:
         status = self.status()

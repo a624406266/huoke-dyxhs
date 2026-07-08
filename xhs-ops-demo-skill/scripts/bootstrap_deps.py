@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import venv
@@ -40,22 +41,58 @@ def create_venv() -> None:
     venv.EnvBuilder(with_pip=True, clear=False).create(VENV_DIR)
 
 
+def site_packages_dirs() -> list[Path]:
+    if os.name == "nt":
+        return [VENV_DIR / "Lib" / "site-packages"]
+    return list((VENV_DIR / "lib").glob("python*/site-packages"))
+
+
+def cleanup_pip_temp_dirs() -> None:
+    for site_packages in site_packages_dirs():
+        if not site_packages.exists():
+            continue
+        for child in site_packages.iterdir():
+            if not child.name.startswith("~"):
+                continue
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            except OSError as exc:
+                print(f"Could not remove stale pip temp path {child}: {exc}", file=sys.stderr)
+
+
 def install_deps(include_playwright: bool = False) -> None:
     create_venv()
+    cleanup_pip_temp_dirs()
     python = str(venv_python())
     expected = requirements_hash(include_playwright)
     current = STAMP.read_text(encoding="utf-8").strip() if STAMP.exists() else ""
+    needs_targeted_repair = False
     if current == expected:
-        return
+        try:
+            verify_imports()
+            return
+        except Exception as exc:
+            print(f"Local dependency verification failed, repairing venv: {exc}", file=sys.stderr)
+            needs_targeted_repair = True
     run([python, "-m", "pip", "install", "--upgrade", "pip"])
-    run([python, "-m", "pip", "install", "-r", str(REQUIREMENTS)])
+    run([python, "-m", "pip", "install", "--upgrade", "-r", str(REQUIREMENTS)])
+    if needs_targeted_repair:
+        run([python, "-m", "pip", "install", "--upgrade", "--force-reinstall", "click>=8.1,<9", "httpx>=0.27,<1"])
     if include_playwright:
-        run([python, "-m", "pip", "install", "playwright>=1.45,<2"])
+        run([python, "-m", "pip", "install", "--upgrade", "playwright>=1.45,<2"])
     STAMP.write_text(expected + "\n", encoding="utf-8")
+    verify_imports()
 
 
 def verify_imports() -> None:
-    code = "import xhs_cli, qrcode; print('local dependencies ok')"
+    code = (
+        "import click, httpx, xhs_cli, qrcode\n"
+        "assert hasattr(click, 'command'), f'broken click module: {getattr(click, \"__file__\", \"<unknown>\")}'\n"
+        "print('local dependencies ok')"
+    )
     run([str(venv_python()), "-c", code])
 
 
