@@ -59,12 +59,24 @@ def write_workbuddy_meta(target: Path) -> None:
     meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def clean_existing_target(target: Path) -> None:
+    for child in target.iterdir():
+        if child.name in IGNORED_NAMES:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
 def install(target: Path) -> None:
     ensure_safe_target(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
-        shutil.rmtree(target)
-    shutil.copytree(ROOT, target, ignore=ignore)
+        clean_existing_target(target)
+        shutil.copytree(ROOT, target, ignore=ignore, dirs_exist_ok=True)
+    else:
+        shutil.copytree(ROOT, target, ignore=ignore)
     write_workbuddy_meta(target)
     print(f"Installed {SKILL_NAME}: {target}")
 

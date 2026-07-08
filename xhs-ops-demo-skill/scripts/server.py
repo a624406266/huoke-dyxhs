@@ -72,6 +72,7 @@ LOCAL_POST_PATHS = {
     "/api/xhs_login/start",
     "/api/xhs_login/status",
     "/api/xhs_login/confirm",
+    "/api/xhs_login/reset",
     "/api/feedback",
 }
 PUBLIC_GET_PATHS = {
@@ -679,6 +680,8 @@ class Handler(SimpleHTTPRequestHandler):
             elif path == "/api/xhs_login/confirm":
                 exported = get_login_helper(int(sales_user_id or 0)).confirm()
                 result = {"exported": exported, "xhs": get_adapter(sales_user_id).status()}
+            elif path == "/api/xhs_login/reset":
+                result = get_login_helper(int(sales_user_id or 0)).reset()
             elif path == "/api/batch_task/start":
                 result = task_manager.start_task(payload, mode="batch", sales_user_id=sales_user_id)
             elif path == "/api/batch_task/status":

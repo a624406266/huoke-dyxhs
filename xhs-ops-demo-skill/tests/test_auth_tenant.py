@@ -190,6 +190,16 @@ class ServerAuthTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(body["data"]["mode"], "browser")
 
+    def test_xhs_login_reset_clears_local_state(self) -> None:
+        class FakeResetHelper:
+            def reset(self) -> dict[str, Any]:
+                return {"status": "cleared", "removed": ["cookie-dir"]}
+
+        self.server.LOGIN_HELPERS[self.server.LOCAL_SALES_USER_ID] = FakeResetHelper()
+        status, body = self.request("POST", "/api/xhs_login/reset", {})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["data"]["status"], "cleared")
+
     def test_harness_routes_require_admin_session(self) -> None:
         status, body = self.request("GET", "/api/agents")
         self.assertEqual(status, 401)

@@ -396,6 +396,7 @@
           <button type="button" class="btn-secondary" onclick="startXhsBrowserLogin()">打开网页登录/验证</button>
           <button type="button" class="btn-secondary" onclick="confirmXhsLogin()">完成后验证登录态</button>
           <button type="button" class="btn-secondary" onclick="refreshXhsLoginStatus()">检查登录态</button>
+          <button type="button" class="btn-secondary" onclick="resetXhsLogin()">切换账号</button>
         </div>
         <div id="xhsQrBox" class="hint" style="display:none;text-align:center;"></div>
         <div id="xhsLoginHelp" class="field-help">尚未检查小红书登录态。</div>
@@ -1313,6 +1314,25 @@
 
     function startXhsBrowserLogin() {
       return startXhsLogin('browser');
+    }
+
+    async function resetXhsLogin() {
+      const ok = confirm('将清除当前工作台保存的小红书 Cookie 和验证窗口缓存。清除后需要重新扫码或网页登录。确定切换账号吗？');
+      if (!ok) return;
+      stopXhsLoginPolling();
+      renderXhsQr(null);
+      setXhsLoginHelp('正在清除本机小红书登录态...', null);
+      try {
+        const res = await fetch(`${apiBase()}/api/xhs_login/reset`, { method:'POST', credentials:'same-origin' });
+        const json = await res.json();
+        if (!json.ok) throw new Error(json.error || '清除登录态失败');
+        const data = json.data || {};
+        const cleared = data.status === 'cleared' && data.ok !== false;
+        setXhsLoginHelp(data.message || '已清除本机小红书登录态。请重新扫码或打开网页登录/验证。', cleared);
+        setStatus(cleared ? '小红书登录态已清除，请重新登录目标账号。' : '请先关闭小红书验证窗口，再重新点击切换账号。', '⚠️');
+      } catch (err) {
+        setXhsLoginHelp(`清除失败：${err.message || err}`, false);
+      }
     }
 
     async function confirmXhsLogin() {

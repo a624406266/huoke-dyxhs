@@ -5,6 +5,7 @@ from io import BytesIO
 import json
 import os
 import platform
+import shutil
 import socket
 import subprocess
 import sys
@@ -172,6 +173,50 @@ class XhsLoginHelper:
                 pass
         self.qr_client = None
         self.qr_session = {}
+
+    def reset(self) -> dict[str, Any]:
+        removed: list[str] = []
+        remaining: list[str] = []
+        with self.lock:
+            self._close_qr_client_locked()
+            if self.process and self.process.poll() is None:
+                try:
+                    self.process.terminate()
+                    self.process.wait(timeout=5)
+                except Exception:
+                    try:
+                        self.process.kill()
+                    except Exception:
+                        pass
+            self.process = None
+            self.port = None
+            self.mode = "idle"
+
+            for path in (self.home_dir / ".xiaohongshu-cli", self.profile_dir):
+                if path.exists():
+                    shutil.rmtree(path, ignore_errors=True)
+                    if path.exists():
+                        remaining.append(str(path))
+                    else:
+                        removed.append(str(path))
+
+            self.home_dir.mkdir(parents=True, exist_ok=True)
+
+        if remaining:
+            message = "部分小红书登录缓存被 Chrome 占用，请先关闭工作台打开的 Chrome 验证窗口，再点击“切换账号”。"
+            status = "partial"
+        else:
+            message = "已清除本机小红书登录态。请重新扫码或打开网页登录/验证以切换账号。"
+            status = "cleared"
+        return {
+            "ok": not remaining,
+            "mode": "idle",
+            "status": status,
+            "message": message,
+            "removed": removed,
+            "remaining": remaining,
+            "homeDir": str(self.home_dir),
+        }
 
     def confirm(self) -> dict[str, Any]:
         if self.mode == "qrcode":
