@@ -126,6 +126,7 @@ class SalesStorage:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id INTEGER NOT NULL,
                     sales_user_id INTEGER NOT NULL DEFAULT 0,
+                    platform TEXT NOT NULL DEFAULT 'xhs',
                     stage TEXT NOT NULL,
                     entity_type TEXT NOT NULL,
                     entity_id TEXT,
@@ -144,6 +145,7 @@ class SalesStorage:
                 CREATE TABLE IF NOT EXISTS notes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sales_user_id INTEGER NOT NULL DEFAULT 0,
+                    platform TEXT NOT NULL DEFAULT 'xhs',
                     note_id TEXT NOT NULL,
                     task_id INTEGER,
                     title TEXT,
@@ -156,6 +158,7 @@ class SalesStorage:
                 CREATE TABLE IF NOT EXISTS comments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sales_user_id INTEGER NOT NULL DEFAULT 0,
+                    platform TEXT NOT NULL DEFAULT 'xhs',
                     comment_id TEXT NOT NULL,
                     task_id INTEGER,
                     note_id TEXT,
@@ -169,6 +172,7 @@ class SalesStorage:
                 CREATE TABLE IF NOT EXISTS leads (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sales_user_id INTEGER NOT NULL DEFAULT 0,
+                    platform TEXT NOT NULL DEFAULT 'xhs',
                     lead_id TEXT NOT NULL,
                     task_id INTEGER,
                     note_id TEXT,
@@ -298,6 +302,11 @@ class SalesStorage:
         )
         for table in ("notes", "comments", "leads", "lead_feedback", "task_summaries"):
             self._add_columns(conn, table, {"sales_user_id": "INTEGER NOT NULL DEFAULT 0"})
+        self._add_columns(conn, "audit_decisions", {"platform": "TEXT NOT NULL DEFAULT 'xhs'"})
+        for table in ("notes", "comments", "leads"):
+            self._add_columns(conn, table, {"platform": "TEXT NOT NULL DEFAULT 'xhs'"})
+            conn.execute(f"UPDATE {table} SET platform = 'xhs' WHERE platform IS NULL OR platform = ''")
+        conn.execute("UPDATE audit_decisions SET platform = 'xhs' WHERE platform IS NULL OR platform = ''")
         self._backfill_sales_user_ids(conn)
 
     def _add_columns(self, conn: Any, table: str, additions: dict[str, str]) -> None:
@@ -317,13 +326,17 @@ class SalesStorage:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_decisions_task ON audit_decisions(task_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_decisions_sales ON audit_decisions(sales_user_id, task_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_decisions_platform ON audit_decisions(task_id, platform)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_decisions_stage ON audit_decisions(task_id, stage, entity_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_decisions_keyword ON audit_decisions(task_id, source_keyword)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_task_id ON notes(task_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_sales_user ON notes(sales_user_id, task_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_platform ON notes(sales_user_id, platform)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_sales_user ON comments(sales_user_id, task_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_platform ON comments(sales_user_id, platform)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_task_id ON leads(task_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_sales_user ON leads(sales_user_id, task_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_platform ON leads(sales_user_id, platform)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_lead_feedback_status ON lead_feedback(status, updated_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_lead_feedback_task_id ON lead_feedback(task_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_lead_feedback_sales_user ON lead_feedback(sales_user_id, status)")
@@ -380,6 +393,7 @@ class SalesStorage:
                 CREATE TABLE notes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sales_user_id INTEGER NOT NULL DEFAULT 0,
+                    platform TEXT NOT NULL DEFAULT 'xhs',
                     note_id TEXT NOT NULL,
                     task_id INTEGER,
                     title TEXT,
@@ -394,6 +408,7 @@ class SalesStorage:
                 CREATE TABLE comments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sales_user_id INTEGER NOT NULL DEFAULT 0,
+                    platform TEXT NOT NULL DEFAULT 'xhs',
                     comment_id TEXT NOT NULL,
                     task_id INTEGER,
                     note_id TEXT,
@@ -409,6 +424,7 @@ class SalesStorage:
                 CREATE TABLE leads (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sales_user_id INTEGER NOT NULL DEFAULT 0,
+                    platform TEXT NOT NULL DEFAULT 'xhs',
                     lead_id TEXT NOT NULL,
                     task_id INTEGER,
                     note_id TEXT,
@@ -444,11 +460,13 @@ class SalesStorage:
         note_id = str(data.get("note_id") or "")
         if not note_id:
             return
+        platform = str(data.get("platform") or "xhs")
         conn.execute(
             """
-            INSERT INTO notes(sales_user_id, note_id, task_id, title, author, url, payload, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO notes(sales_user_id, platform, note_id, task_id, title, author, url, payload, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(sales_user_id, note_id) DO UPDATE SET
+                platform = excluded.platform,
                 task_id = excluded.task_id,
                 title = excluded.title,
                 author = excluded.author,
@@ -458,6 +476,7 @@ class SalesStorage:
             """,
             (
                 sales_user_id,
+                platform,
                 note_id,
                 data.get("task_id"),
                 data.get("title"),
@@ -722,11 +741,13 @@ class SalesStorage:
         comment_id = str(data.get("comment_id") or "")
         if not comment_id:
             return
+        platform = str(data.get("platform") or "xhs")
         conn.execute(
             """
-            INSERT INTO comments(sales_user_id, comment_id, task_id, note_id, nickname, user_id, content, payload, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO comments(sales_user_id, platform, comment_id, task_id, note_id, nickname, user_id, content, payload, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(sales_user_id, comment_id) DO UPDATE SET
+                platform = excluded.platform,
                 task_id = excluded.task_id,
                 note_id = excluded.note_id,
                 nickname = excluded.nickname,
@@ -737,6 +758,7 @@ class SalesStorage:
             """,
             (
                 sales_user_id,
+                platform,
                 comment_id,
                 data.get("task_id"),
                 data.get("note_id"),
@@ -752,12 +774,14 @@ class SalesStorage:
         lead_id = str(data.get("lead_id") or "")
         if not lead_id:
             return
+        platform = str(data.get("platform") or "xhs")
         conn.execute(
             """
-            INSERT INTO leads(sales_user_id, lead_id, task_id, note_id, comment_id, score, priority,
+            INSERT INTO leads(sales_user_id, platform, lead_id, task_id, note_id, comment_id, score, priority,
             product_tags, demand_summary, evidence, outreach_copy, feedback, payload, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(sales_user_id, lead_id) DO UPDATE SET
+                platform = excluded.platform,
                 task_id = excluded.task_id,
                 note_id = excluded.note_id,
                 comment_id = excluded.comment_id,
@@ -773,6 +797,7 @@ class SalesStorage:
             """,
             (
                 sales_user_id,
+                platform,
                 lead_id,
                 data.get("task_id"),
                 data.get("note_id"),
@@ -1002,6 +1027,7 @@ class SalesStorage:
                     (
                         int(task_id),
                         sales_user_id,
+                        str(item.get("platform") or "xhs"),
                         str(item.get("stage") or ""),
                         str(item.get("entity_type") or item.get("entityType") or ""),
                         str(item.get("entity_id") or item.get("entityId") or ""),
@@ -1020,9 +1046,9 @@ class SalesStorage:
                 )
             conn.executemany(
                 """
-                INSERT INTO audit_decisions(task_id, sales_user_id, stage, entity_type, entity_id, note_id,
+                INSERT INTO audit_decisions(task_id, sales_user_id, platform, stage, entity_type, entity_id, note_id,
                 source_keyword, decision, reason, evidence_json, score, confidence, priority, risk, payload_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -1095,6 +1121,7 @@ class SalesStorage:
             "id": int(row["id"]),
             "taskId": int(row["task_id"]),
             "salesUserId": int(row["sales_user_id"] or LEGACY_SALES_USER_ID),
+            "platform": row["platform"] or "xhs",
             "stage": row["stage"] or "",
             "entityType": row["entity_type"] or "",
             "entityId": row["entity_id"] or "",
@@ -1132,13 +1159,15 @@ class SalesStorage:
             return None
 
     def save_note(self, task_id: int, note: dict[str, Any]) -> None:
+        platform = str(note.get("platform") or "xhs")
         with self.connect() as conn:
             sales_user_id = self._task_owner(conn, task_id)
             conn.execute(
                 """
-                INSERT INTO notes(sales_user_id, note_id, task_id, title, author, url, payload, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO notes(sales_user_id, platform, note_id, task_id, title, author, url, payload, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(sales_user_id, note_id) DO UPDATE SET
+                    platform = excluded.platform,
                     task_id = excluded.task_id,
                     title = excluded.title,
                     author = excluded.author,
@@ -1148,6 +1177,7 @@ class SalesStorage:
                 """,
                 (
                     sales_user_id,
+                    platform,
                     note.get("id"),
                     task_id,
                     note.get("title"),
@@ -1162,13 +1192,15 @@ class SalesStorage:
         user_info = comment.get("user_info") or {}
         nickname = user_info.get("nickname") or user_info.get("nick_name") or comment.get("nickname") or comment.get("nick_name")
         user_id = user_info.get("user_id") or comment.get("user_id")
+        platform = str(comment.get("platform") or "xhs")
         with self.connect() as conn:
             sales_user_id = self._task_owner(conn, task_id)
             conn.execute(
                 """
-                INSERT INTO comments(sales_user_id, comment_id, task_id, note_id, nickname, user_id, content, payload, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO comments(sales_user_id, platform, comment_id, task_id, note_id, nickname, user_id, content, payload, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(sales_user_id, comment_id) DO UPDATE SET
+                    platform = excluded.platform,
                     task_id = excluded.task_id,
                     note_id = excluded.note_id,
                     nickname = excluded.nickname,
@@ -1179,6 +1211,7 @@ class SalesStorage:
                 """,
                 (
                     sales_user_id,
+                    platform,
                     comment.get("id"),
                     task_id,
                     note_id,
@@ -1191,6 +1224,7 @@ class SalesStorage:
             )
 
     def save_lead(self, task_id: int, lead: dict[str, Any]) -> None:
+        platform = str(lead.get("platform") or "xhs")
         product_tags = ",".join(
             (p.get("tag", "") if isinstance(p, dict) else str(p))
             for p in lead.get("matched_products") or []
@@ -1199,10 +1233,11 @@ class SalesStorage:
             sales_user_id = self._task_owner(conn, task_id)
             conn.execute(
                 """
-                INSERT INTO leads(sales_user_id, lead_id, task_id, note_id, comment_id, score, priority, product_tags,
+                INSERT INTO leads(sales_user_id, platform, lead_id, task_id, note_id, comment_id, score, priority, product_tags,
                 demand_summary, evidence, outreach_copy, feedback, payload, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(sales_user_id, lead_id) DO UPDATE SET
+                    platform = excluded.platform,
                     task_id = excluded.task_id,
                     note_id = excluded.note_id,
                     comment_id = excluded.comment_id,
@@ -1218,6 +1253,7 @@ class SalesStorage:
                 """,
                 (
                     sales_user_id,
+                    platform,
                     lead.get("lead_id"),
                     task_id,
                     lead.get("note_id"),
@@ -1266,11 +1302,12 @@ class SalesStorage:
             params = [*ids, int(sales_user_id)]
         with self.connect() as conn:
             rows = conn.execute(
-                f"SELECT comment_id, nickname, user_id FROM comments WHERE comment_id IN ({placeholders}){owner_filter}",
+                f"SELECT platform, comment_id, nickname, user_id FROM comments WHERE comment_id IN ({placeholders}){owner_filter}",
                 params,
             ).fetchall()
         return {
             str(row["comment_id"]): {
+                "platform": row["platform"] or "xhs",
                 "nickname": row["nickname"] or "",
                 "user_id": row["user_id"] or "",
             }
@@ -1284,7 +1321,9 @@ class SalesStorage:
             "task_id": row["task_id"],
             "sales_user_id": row["sales_user_id"],
             "salesUserId": row["sales_user_id"],
+            "platform": row["platform"] or payload.get("platform") or "xhs",
             "note_id": row["note_id"] or payload.get("note_id", ""),
+            "post_id": payload.get("post_id") or row["note_id"] or "",
             "comment_id": row["comment_id"] or payload.get("comment_id", ""),
             "score": int(row["score"] or payload.get("score") or 0),
             "priority": row["priority"] or payload.get("priority", ""),
@@ -1302,6 +1341,7 @@ class SalesStorage:
             "commentId": row["comment_id"],
             "taskId": row["task_id"],
             "salesUserId": row["sales_user_id"],
+            "platform": row["platform"] or payload.get("platform") or "xhs",
             "noteId": row["note_id"],
             "nickname": row["nickname"] or payload.get("nickname") or "",
             "userId": row["user_id"] or payload.get("user_id") or "",

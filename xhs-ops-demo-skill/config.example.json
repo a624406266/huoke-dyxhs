@@ -11,6 +11,23 @@
     "max_comments_per_note": 50,
     "enable_follow_actions": false
   },
+  "platforms": {
+    "enabled": ["xhs"]
+  },
+  "opencli": {
+    "bin": ""
+  },
+  "socialdatax": {
+    "api_key_env": "SOCIALDATAX_API_KEY"
+  },
+  "douyin": {
+    "read_delay_min": 7,
+    "read_delay_max": 60,
+    "max_count": 20,
+    "max_comments_per_post": 50,
+    "enable_follow_actions": false,
+    "enable_dm_actions": false
+  },
   "llm": {
     "api_key": "",
     "api_base": "https://poolrouter.com/v1",

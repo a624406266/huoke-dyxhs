@@ -513,6 +513,9 @@
                 <option value="follow_success">关注成功</option>
                 <option value="follow_failed">关注失败</option>
                 <option value="dm_draft_copied">私信草稿已复制</option>
+                <option value="dm_requested">私信已请求</option>
+                <option value="dm_success">私信成功</option>
+                <option value="dm_failed">私信失败</option>
               </select>
             </div>
             <div>
@@ -595,6 +598,19 @@
           <label for="settingXhsBin">XHS 路径</label>
           <input id="settingXhsBin" placeholder="本机可填 xhs 或 venv 中的 xhs 绝对路径" />
 
+          <label>默认采集平台</label>
+          <div class="row">
+            <label class="checks"><input id="settingPlatformXhs" type="checkbox" />小红书</label>
+            <label class="checks"><input id="settingPlatformDouyin" type="checkbox" />抖音</label>
+          </div>
+
+          <label for="settingOpencliBin">OpenCLI 路径</label>
+          <input id="settingOpencliBin" placeholder="可留空使用 PATH 中的 opencli" />
+
+          <label for="settingSocialDataxEnv">SocialDataX 环境变量名</label>
+          <input id="settingSocialDataxEnv" placeholder="SOCIALDATAX_API_KEY，不要粘贴真实 Key" />
+          <div id="socialDataxHelp" class="field-help">这里只填变量名，例如 SOCIALDATAX_API_KEY；真实 Key 放到系统环境变量里。</div>
+
           <label class="checks"><input id="settingRedactUser" type="checkbox" />工作台展示时打码公开昵称和用户 ID</label>
 
           <label>默认采集延迟（秒）</label>
@@ -607,7 +623,14 @@
           <div class="field-help">默认 50。数值越高召回越多，但任务会更慢，也更容易遇到验证码或风控。</div>
 
           <label class="checks"><input id="settingEnableFollowActions" type="checkbox" />允许手动关注线索对象</label>
-          <div class="field-help">默认关闭。开启后，销售页每条线索会显示“关注”按钮；仍需用户逐条二次确认，不支持批量关注，也不会自动私信。</div>
+          <div class="field-help">默认关闭。开启后，小红书线索会显示“关注”按钮；仍需用户逐条二次确认。</div>
+
+          <label for="settingDouyinMaxComments">每个抖音作品最多扫描评论数</label>
+          <input id="settingDouyinMaxComments" type="number" min="1" max="500" value="50" />
+
+          <label class="checks"><input id="settingDouyinFollowActions" type="checkbox" />允许手动关注抖音线索对象</label>
+          <label class="checks"><input id="settingDouyinDmActions" type="checkbox" />允许逐条发送抖音私信</label>
+          <div class="field-help">默认关闭。开启后仍需销售页逐条二次确认，不支持批量关注或批量私信。</div>
         </div>
       </section>
     </section>
@@ -756,6 +779,9 @@
       follow_success: '关注成功',
       follow_failed: '关注失败',
       dm_draft_copied: '私信草稿已复制',
+      dm_requested: '私信已请求',
+      dm_success: '私信成功',
+      dm_failed: '私信失败',
       allow: '通过',
       pass: '通过',
       reject: '拒绝',
@@ -1508,10 +1534,21 @@
           ? '当前已配置 API Key。为安全起见不会回显；留空保存会保留原 Key。'
           : '当前未配置 API Key。请输入中转站 Key 后保存。';
         $('settingXhsBin').value = s.xhs?.bin || '';
+        const enabledPlatforms = s.platforms?.enabled || ['xhs'];
+        $('settingPlatformXhs').checked = enabledPlatforms.includes('xhs');
+        $('settingPlatformDouyin').checked = enabledPlatforms.includes('douyin');
+        $('settingOpencliBin').value = s.opencli?.bin || '';
+        $('settingSocialDataxEnv').value = s.socialdatax?.api_key_env || 'SOCIALDATAX_API_KEY';
+        $('socialDataxHelp').textContent = s.socialdatax?.has_api_key
+          ? `已检测到环境变量 ${s.socialdatax?.api_key_env || 'SOCIALDATAX_API_KEY'}。`
+          : `未检测到环境变量 ${s.socialdatax?.api_key_env || 'SOCIALDATAX_API_KEY'}；抖音只读扫描会失败。`;
         $('settingDelayMin').value = s.xhs?.read_delay_min ?? 7;
         $('settingDelayMax').value = s.xhs?.read_delay_max ?? 60;
         $('settingMaxComments').value = s.xhs?.max_comments_per_note ?? 50;
         $('settingEnableFollowActions').checked = Boolean(s.xhs?.enable_follow_actions);
+        $('settingDouyinMaxComments').value = s.douyin?.max_comments_per_post ?? 50;
+        $('settingDouyinFollowActions').checked = Boolean(s.douyin?.enable_follow_actions);
+        $('settingDouyinDmActions').checked = Boolean(s.douyin?.enable_dm_actions);
         $('settingRedactUser').checked = Boolean(s.sales?.redact_user);
         settingsLoaded = true;
       } catch (err) {
@@ -1543,10 +1580,33 @@
             max_comments_per_note: Number($('settingMaxComments').value || 50),
             enable_follow_actions: $('settingEnableFollowActions').checked
           },
+          platforms: {
+            enabled: [
+              $('settingPlatformXhs').checked ? 'xhs' : '',
+              $('settingPlatformDouyin').checked ? 'douyin' : ''
+            ].filter(Boolean)
+          },
+          opencli: {
+            bin: $('settingOpencliBin').value.trim()
+          },
+          socialdatax: {
+            api_key_env: $('settingSocialDataxEnv').value.trim() || 'SOCIALDATAX_API_KEY'
+          },
+          douyin: {
+            max_comments_per_post: Number($('settingDouyinMaxComments').value || 50),
+            enable_follow_actions: $('settingDouyinFollowActions').checked,
+            enable_dm_actions: $('settingDouyinDmActions').checked
+          },
           sales: {
             redact_user: $('settingRedactUser').checked
           }
         };
+        if (!body.platforms.enabled.length) {
+          return alert('请至少保留一个默认采集平台。');
+        }
+        if (/^(sk-|sdx-)/i.test(body.socialdatax.api_key_env)) {
+          return alert('SocialDataX 字段只填写环境变量名，例如 SOCIALDATAX_API_KEY；不要粘贴真实 Key。');
+        }
         const apiKey = $('settingApiKey').value.trim();
         if (apiKey) body.llm.api_key = apiKey;
         try {

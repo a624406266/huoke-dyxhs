@@ -18,7 +18,9 @@ from agent_harness.evaluator import HarnessEvaluator
 from agent_harness.feedback import FEEDBACK_TYPE_LABELS, FeedbackLearningService
 from agent_harness.registry import PromptRegistry
 from config_loader import load_config
+from douyin_adapter import DouyinBrowserActionAdapter, DouyinLoginHelper
 from lead_pipeline import public_config
+from platform_adapters import PlatformAdapterRegistry
 from product_catalog import product_distribution
 from sales_scoring import redact_text
 from storage import SalesStorage, hash_password, is_password_hash
@@ -33,6 +35,7 @@ STORAGE_CONFIG = CONFIG.get("storage") or {}
 STORAGE = SalesStorage(STORAGE_CONFIG.get("db_path", ROOT / "data" / "sales_leads.db"))
 STORAGE.mark_stale_running_as_interrupted()
 LOGIN_HELPERS: dict[int, XhsLoginHelper] = {}
+DOUYIN_LOGIN_HELPERS: dict[int, DouyinLoginHelper] = {}
 LOCAL_SALES_USER_ID = 0
 
 
@@ -58,12 +61,14 @@ ADMIN_POST_PATHS = {
 LOCAL_GET_PATHS = {
     "/api/tasks/list",
     "/api/xhs_login/status",
+    "/api/douyin_login/status",
 }
 LOCAL_POST_PATHS = {
     "/api/search",
     "/api/leads",
     "/api/leads/follow",
     "/api/leads/dm-draft",
+    "/api/leads/send-dm",
     "/api/tasks/start",
     "/api/tasks/status",
     "/api/tasks/list",
@@ -75,6 +80,10 @@ LOCAL_POST_PATHS = {
     "/api/xhs_login/status",
     "/api/xhs_login/confirm",
     "/api/xhs_login/reset",
+    "/api/douyin_login/start",
+    "/api/douyin_login/status",
+    "/api/douyin_login/confirm",
+    "/api/douyin_login/reset",
     "/api/feedback",
 }
 PUBLIC_GET_PATHS = {
@@ -120,12 +129,22 @@ def xhs_home(sales_user_id: int | None = None) -> Path | None:
     return ROOT / "data" / "xhs-profiles" / str(int(sales_user_id))
 
 
+def douyin_home(sales_user_id: int | None = None) -> Path | None:
+    if sales_user_id is None:
+        return None
+    return ROOT / "data" / "douyin-profiles" / str(int(sales_user_id))
+
+
 def get_adapter(sales_user_id: int | None = None) -> XhsAdapter:
     return XhsAdapter(CONFIG, ROOT, profile_dir=xhs_home(sales_user_id))
 
 
+def get_platform_adapters(sales_user_id: int | None = None) -> PlatformAdapterRegistry:
+    return PlatformAdapterRegistry(CONFIG, ROOT, xhs_profile_dir=xhs_home(sales_user_id))
+
+
 def get_pipeline(sales_user_id: int | None = None) -> HarnessPipeline:
-    return HarnessPipeline(get_adapter(sales_user_id), CONFIG, STORAGE)
+    return HarnessPipeline(get_platform_adapters(sales_user_id), CONFIG, STORAGE)
 
 
 def get_login_helper(sales_user_id: int) -> XhsLoginHelper:
@@ -133,6 +152,14 @@ def get_login_helper(sales_user_id: int) -> XhsLoginHelper:
     if helper is None:
         helper = XhsLoginHelper(ROOT, home_dir=xhs_home(sales_user_id))
         LOGIN_HELPERS[int(sales_user_id)] = helper
+    return helper
+
+
+def get_douyin_login_helper(sales_user_id: int) -> DouyinLoginHelper:
+    helper = DOUYIN_LOGIN_HELPERS.get(int(sales_user_id))
+    if helper is None:
+        helper = DouyinLoginHelper(ROOT, home_dir=douyin_home(sales_user_id))
+        DOUYIN_LOGIN_HELPERS[int(sales_user_id)] = helper
     return helper
 
 
@@ -146,6 +173,16 @@ def xhs_login_status_payload(sales_user_id: int) -> dict[str, Any]:
         return {"helper": helper_data, "xhs": get_adapter(sales_user_id).status(timeout=10)}
     except Exception as exc:
         return {"helper": helper_data, "xhsError": str(exc)}
+
+
+def douyin_login_status_payload(sales_user_id: int) -> dict[str, Any]:
+    helper = get_douyin_login_helper(sales_user_id)
+    helper_data = helper.status()
+    try:
+        login_data = helper.confirm() if helper_data.get("status") == "running" else {"ok": False, "message": helper_data.get("message")}
+        return {"helper": helper_data, "douyin": login_data}
+    except Exception as exc:
+        return {"helper": helper_data, "douyinError": str(exc)}
 
 
 def get_registry() -> PromptRegistry:
@@ -344,7 +381,7 @@ class TaskManager:
                 progress_callback=lambda data, current_round=round_index: self.update_progress(task_id, {**data, "currentRound": current_round, "totalRounds": total_rounds}),
             )
             for note in result.get("notes") or []:
-                notes_map[note["id"]] = note
+                notes_map[f"{note.get('platform') or 'xhs'}:{note['id']}"] = note
             for lead in ((result.get("leads") or {}).get("leads") or []):
                 leads_map[lead["lead_id"]] = lead
             total_comments += int((result.get("leads") or {}).get("totalCommentsScanned", 0))
@@ -382,6 +419,7 @@ class TaskManager:
         return {
             "taskId": task_id,
             "keyword": payload.get("keyword", ""),
+            "platforms": latest_result.get("platforms") or payload.get("platforms") or ["xhs"],
             "demandDescription": payload.get("demandDescription", ""),
             "businessDirection": payload.get("businessDirection", ""),
             "metric": payload.get("metric", "engagement"),
@@ -492,8 +530,17 @@ def default_expected_result(feedback_type: str) -> str:
 def public_runtime_config() -> dict[str, Any]:
     data = public_config()
     xhs = CONFIG.get("xhs") or {}
+    douyin = CONFIG.get("douyin") or {}
+    platforms = CONFIG.get("platforms") or {}
     data["xhs"] = {
         "enable_follow_actions": bool(xhs.get("enable_follow_actions", False)),
+    }
+    data["douyin"] = {
+        "enable_follow_actions": bool(douyin.get("enable_follow_actions", False)),
+        "enable_dm_actions": bool(douyin.get("enable_dm_actions", False)),
+    }
+    data["platforms"] = {
+        "enabled": config_loader.enabled_platforms(platforms.get("enabled")),
     }
     return data
 
@@ -505,11 +552,16 @@ def is_usable_xhs_user_id(value: Any) -> bool:
     return len(text) >= 4
 
 
+def lead_platform(lead: dict[str, Any]) -> str:
+    return str(lead.get("platform") or "xhs").strip().lower() or "xhs"
+
+
 def lead_target_user_id(lead: dict[str, Any], sales_user_id: int | None = None) -> str:
     source_comment = lead.get("source_comment") or {}
     candidates = [
         lead.get("target_user_id"),
         lead.get("raw_user_id"),
+        source_comment.get("target_user_id"),
         source_comment.get("user_id"),
         lead.get("author_user_id"),
     ]
@@ -523,6 +575,18 @@ def lead_target_user_id(lead: dict[str, Any], sales_user_id: int | None = None) 
         if is_usable_xhs_user_id(candidate):
             return str(candidate).strip()
     return ""
+
+
+def lead_profile_url(lead: dict[str, Any], target_user_id: str = "") -> str:
+    profile_url = str(lead.get("profile_url") or (lead.get("source_comment") or {}).get("profile_url") or "").strip()
+    if profile_url:
+        return profile_url
+    target = str(target_user_id or lead_target_user_id(lead)).strip()
+    if not target:
+        return str(lead.get("note_url") or "")
+    if lead_platform(lead) == "douyin":
+        return f"https://www.douyin.com/user/{target}"
+    return f"https://www.xiaohongshu.com/user/profile/{target}"
 
 
 def audit_outreach(
@@ -541,6 +605,7 @@ def audit_outreach(
         return
     STORAGE.save_audit_decision(
         task_id,
+        platform=lead_platform(lead),
         stage="outreach",
         entity_type="lead",
         entity_id=lead.get("lead_id"),
@@ -556,7 +621,9 @@ def audit_outreach(
             "lead_id": lead.get("lead_id"),
             "lead_type": lead.get("lead_type"),
             "sales_user_id": int(sales_user_id or 0),
+            "platform": lead_platform(lead),
             "target_user_id": target_user_id,
+            "profile_url": lead_profile_url(lead, target_user_id),
             "nickname": lead.get("nickname") or lead.get("raw_nickname") or "",
             "note_url": lead.get("note_url"),
             "draft_preview": str(draft or "")[:200],
@@ -566,34 +633,43 @@ def audit_outreach(
 
 
 def follow_lead(payload: dict[str, Any], sales_user_id: int | None) -> dict[str, Any]:
-    if not bool((CONFIG.get("xhs") or {}).get("enable_follow_actions", False)):
-        raise ValueError("手动关注功能未开启。请先在 Harness 系统设置中开启“允许手动关注线索对象”。")
     lead_id = str(payload.get("leadId") or payload.get("lead_id") or "").strip()
     if not lead_id:
         raise ValueError("leadId 不能为空。")
     lead = STORAGE.get_lead(lead_id, sales_user_id=sales_user_id)
     if not lead:
         raise ValueError("线索不存在或不属于当前销售账号。")
+    platform = lead_platform(lead)
+    if platform == "douyin":
+        if not bool((CONFIG.get("douyin") or {}).get("enable_follow_actions", False)):
+            raise ValueError("抖音手动关注功能未开启。请先在 Harness 系统设置中开启抖音关注。")
+    elif not bool((CONFIG.get("xhs") or {}).get("enable_follow_actions", False)):
+        raise ValueError("手动关注功能未开启。请先在 Harness 系统设置中开启“允许手动关注线索对象”。")
     target_user_id = lead_target_user_id(lead, sales_user_id=sales_user_id)
     if not target_user_id:
-        audit_outreach(lead, "follow_failed", "线索缺少可用的小红书用户 ID，无法关注。", sales_user_id=sales_user_id)
-        raise ValueError("该线索缺少可用的小红书用户 ID，无法关注。")
+        audit_outreach(lead, "follow_failed", f"线索缺少可用的{platform}用户 ID，无法关注。", sales_user_id=sales_user_id)
+        raise ValueError("该线索缺少可用用户 ID，无法关注。")
     audit_outreach(lead, "follow_requested", "用户在工作台手动确认关注该线索对象。", sales_user_id=sales_user_id, target_user_id=target_user_id)
     try:
-        adapter = get_adapter(sales_user_id)
-        adapter.ensure_authenticated()
-        result = adapter.follow_user(target_user_id)
+        if platform == "douyin":
+            action_adapter = DouyinBrowserActionAdapter(get_douyin_login_helper(int(sales_user_id or 0)))
+            result = action_adapter.follow_user(target_user_id, profile_url=lead_profile_url(lead, target_user_id))
+        else:
+            adapter = get_adapter(sales_user_id)
+            adapter.ensure_authenticated()
+            result = adapter.follow_user(target_user_id)
     except Exception as exc:
         message = str(exc)
         audit_outreach(lead, "follow_failed", "关注执行失败，需要人工处理登录态、验证码、账号权限或网络环境。", sales_user_id=sales_user_id, target_user_id=target_user_id, error=message)
         raise RuntimeError(message) from exc
-    audit_outreach(lead, "follow_success", "已通过本地 xhs CLI 执行单条手动关注。", sales_user_id=sales_user_id, target_user_id=target_user_id, result=result)
+    audit_outreach(lead, "follow_success", f"已通过本地{('抖音浏览器' if platform == 'douyin' else 'xhs CLI')}执行单条手动关注。", sales_user_id=sales_user_id, target_user_id=target_user_id, result=result)
     return {
         "ok": True,
         "leadId": lead_id,
+        "platform": platform,
         "userId": target_user_id,
         "nickname": lead.get("nickname") or lead.get("raw_nickname") or "",
-        "xhs": result,
+        platform: result,
     }
 
 
@@ -614,6 +690,43 @@ def audit_dm_draft(payload: dict[str, Any], sales_user_id: int | None) -> dict[s
         draft=draft,
     )
     return {"ok": True, "leadId": lead_id, "decision": "dm_draft_copied"}
+
+
+def send_dm_lead(payload: dict[str, Any], sales_user_id: int | None) -> dict[str, Any]:
+    lead_id = str(payload.get("leadId") or payload.get("lead_id") or "").strip()
+    if not lead_id:
+        raise ValueError("leadId 不能为空。")
+    lead = STORAGE.get_lead(lead_id, sales_user_id=sales_user_id)
+    if not lead:
+        raise ValueError("线索不存在或不属于当前销售账号。")
+    if lead_platform(lead) != "douyin":
+        raise ValueError("当前仅抖音线索支持由工作台发送私信；小红书仍只提供私信草稿。")
+    if not bool((CONFIG.get("douyin") or {}).get("enable_dm_actions", False)):
+        raise ValueError("抖音私信发送功能未开启。请先在 Harness 系统设置中开启抖音私信。")
+    message = str(payload.get("message") or payload.get("draft") or payload.get("text") or "").strip()
+    if not message:
+        raise ValueError("私信内容不能为空。")
+    target_user_id = lead_target_user_id(lead, sales_user_id=sales_user_id)
+    if not target_user_id:
+        audit_outreach(lead, "dm_failed", "线索缺少可用的抖音用户 ID，无法发送私信。", sales_user_id=sales_user_id, draft=message)
+        raise ValueError("该线索缺少可用抖音用户 ID，无法发送私信。")
+    audit_outreach(lead, "dm_requested", "用户在工作台手动确认发送抖音私信。", sales_user_id=sales_user_id, target_user_id=target_user_id, draft=message)
+    try:
+        action_adapter = DouyinBrowserActionAdapter(get_douyin_login_helper(int(sales_user_id or 0)))
+        result = action_adapter.send_dm(target_user_id, message, profile_url=lead_profile_url(lead, target_user_id))
+    except Exception as exc:
+        error = str(exc)
+        audit_outreach(lead, "dm_failed", "抖音私信发送失败，需要人工处理登录态、验证码、账号权限、互关限制或页面变化。", sales_user_id=sales_user_id, target_user_id=target_user_id, error=error, draft=message)
+        raise RuntimeError(error) from exc
+    audit_outreach(lead, "dm_success", "已通过本地抖音浏览器执行单条手动私信发送。", sales_user_id=sales_user_id, target_user_id=target_user_id, result=result, draft=message)
+    return {
+        "ok": True,
+        "leadId": lead_id,
+        "platform": "douyin",
+        "userId": target_user_id,
+        "nickname": lead.get("nickname") or lead.get("raw_nickname") or "",
+        "douyin": result,
+    }
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -699,9 +812,9 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path == "/api/status":
             try:
-                adapter = get_adapter()
-                status = adapter.status()
-                self.respond_json({"ok": True, "data": {"xhs": status, "command": adapter.command}})
+                adapters = get_platform_adapters()
+                status = adapters.status()
+                self.respond_json({"ok": True, "data": {"platforms": status, "command": adapters.command}})
             except Exception as exc:
                 self.respond_json({"ok": False, "error": str(exc)}, status=400)
             return
@@ -710,6 +823,9 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path == "/api/xhs_login/status":
             self.respond_json({"ok": True, "data": xhs_login_status_payload(LOCAL_SALES_USER_ID)})
+            return
+        if path == "/api/douyin_login/status":
+            self.respond_json({"ok": True, "data": douyin_login_status_payload(LOCAL_SALES_USER_ID)})
             return
         super().do_GET()
 
@@ -799,6 +915,8 @@ class Handler(SimpleHTTPRequestHandler):
                 result = follow_lead(payload, sales_user_id)
             elif path == "/api/leads/dm-draft":
                 result = audit_dm_draft(payload, sales_user_id)
+            elif path == "/api/leads/send-dm":
+                result = send_dm_lead(payload, sales_user_id)
             elif path == "/api/tasks/status":
                 result = task_manager.get_status(self.task_id_from_payload(payload), sales_user_id=sales_user_id)
             elif path == "/api/tasks/list":
@@ -815,6 +933,14 @@ class Handler(SimpleHTTPRequestHandler):
                 result = {"exported": exported, "xhs": get_adapter(sales_user_id).status()}
             elif path == "/api/xhs_login/reset":
                 result = get_login_helper(int(sales_user_id or 0)).reset()
+            elif path == "/api/douyin_login/start":
+                result = get_douyin_login_helper(int(sales_user_id or 0)).start(mode=str(payload.get("mode") or "browser"))
+            elif path == "/api/douyin_login/status":
+                result = douyin_login_status_payload(int(sales_user_id or 0))
+            elif path == "/api/douyin_login/confirm":
+                result = {"douyin": get_douyin_login_helper(int(sales_user_id or 0)).confirm()}
+            elif path == "/api/douyin_login/reset":
+                result = get_douyin_login_helper(int(sales_user_id or 0)).reset()
             elif path == "/api/batch_task/start":
                 result = task_manager.start_task(payload, mode="batch", sales_user_id=sales_user_id)
             elif path == "/api/batch_task/status":

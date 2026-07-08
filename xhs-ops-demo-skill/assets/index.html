@@ -395,10 +395,11 @@
         <span id="salesNav" class="nav-actions">
           <span id="salesUserLabel" class="nav-user">本地工作台</span>
           <button id="xhsLoginBtn" class="nav-link" title="小红书登录 / 验证">小红书登录</button>
+          <button id="douyinLoginBtn" class="nav-link" title="抖音登录 / 验证">抖音登录</button>
         </span>
       </div>
     </div>
-    <div class="sub">面向不同团队和行业，采集分析小红书公开笔记与评论。总控 Agent 先理解需求描述，再规划关键词、筛选帖子、识别可人工跟进线索。系统不会自动触达；关注需逐条手动确认，私信仅提供草稿辅助。</div>
+    <div class="sub">面向不同团队和行业，采集分析小红书与抖音公开内容和评论。总控 Agent 先理解需求描述，再规划关键词、筛选帖子、识别可人工跟进线索。触达动作需逐条手动确认。</div>
   </header>
 
   <div id="xhsLoginModal" class="modal-mask">
@@ -427,6 +428,30 @@
     </div>
   </div>
 
+  <div id="douyinLoginModal" class="modal-mask">
+    <div class="modal">
+      <div class="modal-head">
+        <h2>抖音登录 / 验证</h2>
+        <button class="icon-btn" style="box-shadow:none;width:34px;height:34px;font-size:16px;" onclick="closeDouyinLogin()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="hint" style="margin-top:0;">
+          本机工作台使用本地 Chrome 抖音登录态。这里不会绕过验证码；如平台要求验证，请在打开的官方页面中人工完成。
+        </div>
+        <div class="btn-row" style="margin-top:10px;">
+          <button type="button" onclick="startDouyinLogin()">打开抖音登录/验证窗口</button>
+          <button type="button" class="btn-secondary" onclick="confirmDouyinLogin()">完成后验证登录态</button>
+          <button type="button" class="btn-secondary" onclick="refreshDouyinLoginStatus()">检查登录态</button>
+          <button type="button" class="btn-secondary" onclick="resetDouyinLogin()">切换账号</button>
+        </div>
+        <div id="douyinLoginHelp" class="field-help">尚未检查抖音登录态。</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="closeDouyinLogin()">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <div id="dmDraftModal" class="modal-mask">
     <div class="modal">
       <div class="modal-head">
@@ -444,6 +469,7 @@
         <button type="button" class="btn-secondary" onclick="closeDmDraft()">关闭</button>
         <button type="button" class="btn-secondary" onclick="openLeadProfileFromDraft()">打开对象主页</button>
         <button type="button" onclick="copyDmDraft()">复制话术</button>
+        <button id="sendDmBtn" type="button" onclick="sendDmDraft()" style="display:none;">发送抖音私信</button>
       </div>
     </div>
   </div>
@@ -492,6 +518,12 @@
               <label for="minScore">线索阈值</label>
               <input id="minScore" type="number" min="0" max="100" value="60" />
             </div>
+          </div>
+
+          <label>采集平台</label>
+          <div class="row">
+            <label class="checks"><input id="platformXhs" type="checkbox" checked />小红书</label>
+            <label class="checks"><input id="platformDouyin" type="checkbox" />抖音</label>
           </div>
 
           <div class="row">
@@ -550,7 +582,7 @@
       </div>
 
       <div class="hint">
-        <b>合规边界：</b>采集分析阶段仅执行 status/search/read/comments。遇到验证码、风控、登录过期会停止任务；关注仅在开启设置后逐条手动确认，私信只提供草稿复制，不自动发送。
+        <b>合规边界：</b>采集分析阶段仅执行公开内容搜索、详情和评论读取。遇到验证码、风控、登录过期会停止任务；关注和抖音私信仅在开启设置后逐条手动确认。
       </div>
     </section>
 
@@ -601,9 +633,10 @@
     let cachedData = null;
     let pollTimer = null;
     let xhsLoginPollTimer = null;
+    let douyinLoginPollTimer = null;
     let currentTaskId = localStorage.getItem('currentTaskId') || '';
     let lastTaskEvents = [];
-    let workbenchConfig = { xhs: { enable_follow_actions: false } };
+    let workbenchConfig = { xhs: { enable_follow_actions: false }, douyin: { enable_follow_actions: false, enable_dm_actions: false }, platforms: { enabled: ['xhs'] } };
     let currentDraftLeadIndex = null;
     const FEEDBACK_LABELS = {
       valid_lead: '有效线索',
@@ -729,10 +762,19 @@
       return cleanUserId(
         lead?.raw_user_id ||
         lead?.target_user_id ||
+        lead?.source_comment?.target_user_id ||
         lead?.source_comment?.user_id ||
         lead?.author_user_id ||
         lead?.user_id
       );
+    }
+
+    function leadPlatform(lead) {
+      return String(lead?.platform || 'xhs').toLowerCase();
+    }
+
+    function platformLabel(platform) {
+      return platform === 'douyin' ? '抖音' : '小红书';
     }
 
     function hasFollowTarget(lead) {
@@ -741,8 +783,21 @@
 
     function leadProfileUrl(lead) {
       const userId = leadTargetUserId(lead);
+      if (lead?.profile_url) return lead.profile_url;
+      if (userId && leadPlatform(lead) === 'douyin') return `https://www.douyin.com/user/${encodeURIComponent(userId)}`;
       if (userId) return `https://www.xiaohongshu.com/user/profile/${encodeURIComponent(userId)}`;
       return lead?.note_url || '';
+    }
+
+    function platformFollowEnabled(lead) {
+      const platform = leadPlatform(lead);
+      return platform === 'douyin'
+        ? Boolean(workbenchConfig?.douyin?.enable_follow_actions)
+        : Boolean(workbenchConfig?.xhs?.enable_follow_actions);
+    }
+
+    function canSendDouyinDm(lead) {
+      return leadPlatform(lead) === 'douyin' && Boolean(workbenchConfig?.douyin?.enable_dm_actions) && Boolean(leadTargetUserId(lead));
     }
 
     function outreachDraft(lead) {
@@ -780,24 +835,36 @@
       }
     }
 
+    async function getCurrentDouyinUserText() {
+      try {
+        const data = await postJson('/api/douyin_login/status', {});
+        if (data?.douyin?.ok) return '抖音登录态已确认';
+        return data?.douyinError ? `未确认：${data.douyinError}` : '未确认登录态';
+      } catch (err) {
+        return `未确认：${err.message || err}`;
+      }
+    }
+
     async function confirmFollowLead(index) {
       const lead = cachedData?.leads?.leads?.[index];
       if (!lead) return alert('找不到该线索数据');
-      if (!workbenchConfig?.xhs?.enable_follow_actions) {
-        return alert('手动关注功能未开启。请先在 Harness 控制台的系统设置中开启“允许手动关注线索对象”。');
+      const platform = leadPlatform(lead);
+      const label = platformLabel(platform);
+      if (!platformFollowEnabled(lead)) {
+        return alert(`${label}手动关注功能未开启。请先在 Harness 控制台系统设置中开启对应平台关注。`);
       }
-      if (!hasFollowTarget(lead)) return alert('该线索没有可用的小红书用户 ID，无法关注。');
-      const accountText = await getCurrentXhsUserText();
+      if (!hasFollowTarget(lead)) return alert(`该线索没有可用的${label}用户 ID，无法关注。`);
+      const accountText = platform === 'douyin' ? await getCurrentDouyinUserText() : await getCurrentXhsUserText();
       const visibleUserId = lead.user_id || leadTargetUserId(lead) || '-';
       const ok = confirm(
         [
-          '即将执行一次小红书关注动作，请确认：',
+          `即将执行一次${label}关注动作，请确认：`,
           '',
           `当前登录账号：${accountText}`,
           `目标对象：${lead.nickname || '未知用户'}（${visibleUserId}）`,
           `来源线索：${lead.demand_summary || lead.evidence || lead.lead_id || '-'}`,
           '',
-          '该动作只会关注这一条线索对象，不会批量关注，也不会发送私信。'
+          '该动作只会关注这一条线索对象，不会批量关注，也不会自动发送其他消息。'
         ].join('\n')
       );
       if (!ok) return;
@@ -827,10 +894,15 @@
       const lead = cachedData?.leads?.leads?.[index];
       if (!lead) return alert('找不到该线索数据');
       currentDraftLeadIndex = index;
+      const platform = leadPlatform(lead);
+      const label = platformLabel(platform);
       $('dmDraftText').value = outreachDraft(lead);
       $('dmDraftMeta').textContent = `${lead.nickname || '未知用户'} · ${lead.user_id || leadTargetUserId(lead) || '无用户 ID'} · ${lead.demand_summary || lead.evidence || ''}`;
-      $('dmDraftStatus').textContent = '草稿可编辑。复制后请在小红书页面中人工确认发送。';
+      $('dmDraftStatus').textContent = platform === 'douyin'
+        ? '内容可编辑。开启抖音私信后，可逐条确认发送；也可以只复制话术。'
+        : '草稿可编辑。复制后请在小红书页面中人工确认发送。';
       $('dmDraftStatus').style.color = 'var(--muted)';
+      $('sendDmBtn').style.display = canSendDouyinDm(lead) ? 'inline-flex' : 'none';
       $('dmDraftModal').style.display = 'flex';
     }
 
@@ -859,7 +931,7 @@
           $('dmDraftText').select();
           document.execCommand('copy');
         }
-        $('dmDraftStatus').textContent = '已复制草稿。系统不会自动发送私信，请在小红书页面中人工确认。';
+        $('dmDraftStatus').textContent = `已复制草稿。${leadPlatform(lead) === 'douyin' ? '未执行发送动作。' : '系统不会自动发送私信，请在小红书页面中人工确认。'}`;
         $('dmDraftStatus').style.color = 'var(--green)';
         const statusEl = $(`outreachStatus-${currentDraftLeadIndex}`);
         if (statusEl) {
@@ -874,6 +946,47 @@
       } catch (err) {
         $('dmDraftStatus').textContent = `复制失败：${err.message || err}`;
         $('dmDraftStatus').style.color = 'var(--red)';
+      }
+    }
+
+    async function sendDmDraft() {
+      const lead = cachedData?.leads?.leads?.[currentDraftLeadIndex];
+      if (!lead) return alert('找不到该线索数据');
+      if (!canSendDouyinDm(lead)) return alert('抖音私信发送未开启，或该线索缺少可用抖音用户 ID。');
+      const text = $('dmDraftText').value.trim();
+      if (!text) return alert('私信内容不能为空。');
+      const ok = confirm([
+        '即将发送一条抖音私信，请确认：',
+        '',
+        `目标对象：${lead.nickname || '未知用户'}（${lead.user_id || leadTargetUserId(lead) || '-'}）`,
+        `消息内容：${text}`,
+        '',
+        '该动作只会发送这一条私信，不会批量发送。'
+      ].join('\n'));
+      if (!ok) return;
+      $('dmDraftStatus').textContent = '正在发送抖音私信...';
+      $('dmDraftStatus').style.color = 'var(--muted)';
+      const statusEl = $(`outreachStatus-${currentDraftLeadIndex}`);
+      if (statusEl) {
+        statusEl.textContent = '正在发送抖音私信...';
+        statusEl.style.color = 'var(--muted)';
+      }
+      try {
+        await postJson('/api/leads/send-dm', { leadId: lead.lead_id, message: text });
+        $('dmDraftStatus').textContent = '抖音私信已发送，可在 Harness 审计日志查看记录。';
+        $('dmDraftStatus').style.color = 'var(--green)';
+        if (statusEl) {
+          statusEl.textContent = '抖音私信发送成功';
+          statusEl.style.color = 'var(--green)';
+        }
+        setStatus('已完成单条抖音私信发送。', '✅');
+      } catch (err) {
+        $('dmDraftStatus').textContent = `发送失败：${err.message || err}`;
+        $('dmDraftStatus').style.color = 'var(--red)';
+        if (statusEl) {
+          statusEl.textContent = `私信失败：${err.message || err}`;
+          statusEl.style.color = 'var(--red)';
+        }
       }
     }
 
@@ -974,6 +1087,10 @@
       }
       const data = {
         demandDescription,
+        platforms: [
+          $('platformXhs')?.checked ? 'xhs' : '',
+          $('platformDouyin')?.checked ? 'douyin' : ''
+        ].filter(Boolean),
         businessDirection: $('businessDirection')?.value || 'cloud_ai',
         industry: $('industry').value.trim(),
         region: $('region').value.trim(),
@@ -987,6 +1104,9 @@
         readDetail: $('readDetail').checked,
         scanLeads: $('scanLeads').checked
       };
+      if (!data.platforms.length) {
+        throw new Error('请至少选择一个采集平台。');
+      }
       if ($('batchMode').checked) {
         data.rounds = Number($('batchRounds').value || 3);
         data.intervalMin = Number($('intervalMin').value || 30);
@@ -1009,7 +1129,7 @@
       const noteRows = notes.map(n => `
         <tr>
           <td><span class="pill">#${n.rank || '-'}</span></td>
-          <td><b>${esc(n.title)}</b><div class="small">${esc((n.tags || []).slice(0, 5).join(' / '))}</div></td>
+          <td><b>${esc(n.title)}</b><div class="small">${esc(platformLabel(leadPlatform(n)))} · ${esc((n.tags || []).slice(0, 5).join(' / '))}</div></td>
           <td>${esc(n.author)}</td>
           <td>${esc(n.publish_date || '未知')}</td>
           <td class="num">${fmt(n.liked)}</td>
@@ -1026,10 +1146,16 @@
         const sourceTitle = (l.note_title || '来源笔记').slice(0, 28);
         const leadTypeLabel = l.lead_type === 'note_author' ? '笔记作者' : '评论线索';
         const geoLabel = geoStatusLabel(l.geo_status);
-        const followEnabled = Boolean(workbenchConfig?.xhs?.enable_follow_actions);
+        const platform = leadPlatform(l);
+        const platformName = platformLabel(platform);
+        const followEnabled = platformFollowEnabled(l);
         const followTargetAvailable = hasFollowTarget(l);
         const followLabel = followEnabled ? (followTargetAvailable ? '关注' : '无用户ID') : '关注未开启';
         const followDisabled = !followEnabled || !followTargetAvailable ? 'disabled' : '';
+        const dmLabel = platform === 'douyin' && workbenchConfig?.douyin?.enable_dm_actions ? '抖音私信' : '私信草稿';
+        const outreachHint = platform === 'douyin'
+          ? (workbenchConfig?.douyin?.enable_dm_actions ? '关注和私信均需逐条人工确认。' : '关注需逐条确认；抖音私信发送未开启。')
+          : (followEnabled ? '触达动作需逐条人工确认；私信只生成草稿。' : '关注功能默认关闭；私信只生成草稿。');
         return `
           <article class="lead-card">
             <div class="lead-card-head">
@@ -1040,6 +1166,7 @@
               <div class="lead-main">
                 <h3>${esc(summary)}</h3>
                 <div class="lead-meta">
+                  <span>${esc(platformName)}</span>
                   <span>${esc(leadTypeLabel)}</span>
                   <span>${esc(l.nickname || '未知用户')}</span>
                   <span>ID: ${esc(l.user_id || '-')}</span>
@@ -1070,8 +1197,8 @@
             </div>
             <div class="touch-actions">
               <button type="button" class="btn-follow" ${followDisabled} onclick="confirmFollowLead(${idx})">${esc(followLabel)}</button>
-              <button type="button" class="btn-draft" onclick="openDmDraft(${idx})">私信草稿</button>
-              <div id="outreachStatus-${idx}" class="small outreach-status">${esc(followEnabled ? '触达动作需逐条人工确认；私信只生成草稿。' : '关注功能默认关闭；私信只生成草稿。')}</div>
+              <button type="button" class="btn-draft" onclick="openDmDraft(${idx})">${esc(dmLabel)}</button>
+              <div id="outreachStatus-${idx}" class="small outreach-status">${esc(outreachHint)}</div>
             </div>
             <div class="lead-actions feedback-cell">
               <select id="feedbackType-${idx}">
@@ -1364,6 +1491,9 @@
         const json = await res.json();
         if (!json.ok) return;
         workbenchConfig = json.data || workbenchConfig;
+        const enabled = workbenchConfig?.platforms?.enabled || ['xhs'];
+        if ($('platformXhs')) $('platformXhs').checked = enabled.includes('xhs');
+        if ($('platformDouyin')) $('platformDouyin').checked = enabled.includes('douyin');
         const firstDirection = json.data?.businessDirections?.[0]?.value;
         if (firstDirection && !$('businessDirection').value) $('businessDirection').value = firstDirection;
       } catch {}
@@ -1608,10 +1738,111 @@
       }
     }
 
+    function openDouyinLogin() {
+      $('douyinLoginModal').style.display = 'flex';
+      refreshDouyinLoginStatus({ silent: true });
+    }
+
+    function closeDouyinLogin() {
+      $('douyinLoginModal').style.display = 'none';
+      stopDouyinLoginPolling();
+    }
+
+    function setDouyinLoginHelp(text, ok = null) {
+      const el = $('douyinLoginHelp');
+      if (!el) return;
+      el.textContent = text;
+      el.style.color = ok === true ? 'var(--green)' : (ok === false ? 'var(--red)' : 'var(--muted)');
+    }
+
+    function stopDouyinLoginPolling() {
+      if (!douyinLoginPollTimer) return;
+      clearInterval(douyinLoginPollTimer);
+      douyinLoginPollTimer = null;
+    }
+
+    function startDouyinLoginPolling() {
+      if (douyinLoginPollTimer) return;
+      douyinLoginPollTimer = setInterval(() => {
+        if ($('douyinLoginModal').style.display !== 'flex') {
+          stopDouyinLoginPolling();
+          return;
+        }
+        refreshDouyinLoginStatus({ silent: true });
+      }, 3000);
+    }
+
+    function renderDouyinLoginState(data) {
+      const helper = data?.helper || {};
+      const douyin = data?.douyin;
+      if (douyin?.ok) {
+        stopDouyinLoginPolling();
+        setDouyinLoginHelp(douyin.message || '抖音登录态已确认。', true);
+        return;
+      }
+      if (helper.status === 'running') {
+        startDouyinLoginPolling();
+        setDouyinLoginHelp(helper.message || '抖音登录/验证窗口已打开。请在 Chrome 中完成登录或验证码验证。', null);
+        return;
+      }
+      stopDouyinLoginPolling();
+      setDouyinLoginHelp(`当前未确认登录。${data?.douyinError || helper.message || '请打开抖音登录/验证窗口。'}`, false);
+    }
+
+    async function startDouyinLogin() {
+      setDouyinLoginHelp('正在打开抖音登录/验证窗口...', null);
+      try {
+        const data = await postJson('/api/douyin_login/start', { mode: 'browser' });
+        renderDouyinLoginState({ helper: data });
+      } catch (err) {
+        stopDouyinLoginPolling();
+        setDouyinLoginHelp(`打开失败：${err.message || err}`, false);
+      }
+    }
+
+    async function confirmDouyinLogin() {
+      setDouyinLoginHelp('正在确认抖音登录态...', null);
+      try {
+        const data = await postJson('/api/douyin_login/confirm', {});
+        renderDouyinLoginState({ helper: { status: 'running' }, douyin: data?.douyin || data });
+        if ((data?.douyin || data)?.ok) setStatus('抖音登录态已确认，可以启动扫描或手动触达。', '✅');
+      } catch (err) {
+        setDouyinLoginHelp(`确认失败：${err.message || err}`, false);
+      }
+    }
+
+    async function refreshDouyinLoginStatus(options = {}) {
+      if (!options.silent) setDouyinLoginHelp('正在检查抖音登录态...', null);
+      try {
+        const data = await postJson('/api/douyin_login/status', {});
+        renderDouyinLoginState(data || {});
+      } catch (err) {
+        stopDouyinLoginPolling();
+        setDouyinLoginHelp(`检查失败：${err.message || err}`, false);
+      }
+    }
+
+    async function resetDouyinLogin() {
+      const ok = confirm('将清除当前工作台保存的抖音 Chrome 登录缓存。清除后需要重新网页登录。确定切换账号吗？');
+      if (!ok) return;
+      stopDouyinLoginPolling();
+      setDouyinLoginHelp('正在清除本机抖音登录态...', null);
+      try {
+        const data = await postJson('/api/douyin_login/reset', {});
+        const cleared = data.status === 'cleared' && data.ok !== false;
+        setDouyinLoginHelp(data.message || '已清除本机抖音登录态。请重新打开网页登录/验证。', cleared);
+        setStatus(cleared ? '抖音登录态已清除，请重新登录目标账号。' : '请先关闭抖音验证窗口，再重新点击切换账号。', '⚠️');
+      } catch (err) {
+        setDouyinLoginHelp(`清除失败：${err.message || err}`, false);
+      }
+    }
+
     $('searchBtn').addEventListener('click', search);
     $('stopBtn').addEventListener('click', stopBatch);
     $('xhsLoginBtn').addEventListener('click', openXhsLogin);
     $('xhsLoginModal').addEventListener('click', e => { if (e.target.id === 'xhsLoginModal') closeXhsLogin(); });
+    $('douyinLoginBtn').addEventListener('click', openDouyinLogin);
+    $('douyinLoginModal').addEventListener('click', e => { if (e.target.id === 'douyinLoginModal') closeDouyinLogin(); });
     $('batchMode').addEventListener('change', e => { $('batchFields').style.display = e.target.checked ? 'block' : 'none'; });
     wireButtonFeedback();
     window.addEventListener('DOMContentLoaded', bootSales);

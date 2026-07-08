@@ -49,6 +49,7 @@ def extract_note(item: dict[str, Any], rank: int = 0) -> dict[str, Any] | None:
     if item.get("model_type") != "note":
         return None
     card = item.get("note_card") or {}
+    platform = str(item.get("platform") or card.get("platform") or "xhs").strip().lower() or "xhs"
     note_id = item.get("id") or card.get("note_id") or card.get("id")
     if not note_id:
         return None
@@ -74,13 +75,19 @@ def extract_note(item: dict[str, Any], rank: int = 0) -> dict[str, Any] | None:
                 publish_date = tag.get("text")
                 break
 
+    url = card.get("url") or item.get("url") or f"https://www.xiaohongshu.com/explore/{note_id}"
+    if platform == "douyin" and not (card.get("url") or item.get("url")):
+        url = f"https://www.douyin.com/video/{note_id}"
+
     return {
+        "platform": platform,
         "rank": rank,
         "id": note_id,
-        "url": f"https://www.xiaohongshu.com/explore/{note_id}",
+        "post_id": item.get("post_id") or item.get("aweme_id") or note_id,
+        "url": url,
         "title": title,
         "author": user.get("nickname") or user.get("nick_name") or "",
-        "author_user_id": user.get("id") or user.get("user_id") or "",
+        "author_user_id": user.get("sec_user_id") or user.get("id") or user.get("user_id") or "",
         "liked": liked,
         "collected": collected,
         "comments": comments,

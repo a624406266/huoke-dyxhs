@@ -160,3 +160,6 @@ class XhsAdapter:
         if not target:
             raise RuntimeError("缺少可关注的小红书用户 ID。")
         return self.run(["follow", target, "--json"], timeout=60)
+
+
+XhsCliAdapter = XhsAdapter

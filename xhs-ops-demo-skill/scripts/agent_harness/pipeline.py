@@ -4,6 +4,7 @@ import random
 import time
 from typing import Any
 
+from config_loader import enabled_platforms
 from llm_client import has_llm_key
 from lead_pipeline import METRIC_LABELS, extract_note, merge_note, within_time_filter
 from product_catalog import BUSINESS_DIRECTIONS, PRODUCTS, product_distribution
@@ -47,11 +48,8 @@ class HarnessPipeline:
         runner = self.runner or StructuredAgentRunner(self.config, self.storage, task_id, registry)
         evaluator = HarnessEvaluator(self.storage)
 
-        emit("info", "登录检查", "检查小红书登录态...")
-        self.adapter.ensure_authenticated()
-        emit("success", "登录检查", "小红书登录态有效。")
-
         settings = self._settings(payload)
+        self._ensure_platforms_ready(settings, emit)
         task_context = {
             "payload": payload,
             "demandDescription": settings["demandDescription"],
@@ -192,6 +190,8 @@ class HarnessPipeline:
         progress({"stage": "done", "percent": 100, "current": 1, "total": 1})
         return {
             "keyword": "、".join(keywords),
+            "platforms": settings["platforms"],
+            "platformLabels": settings["platformLabels"],
             "demandDescription": settings["demandDescription"],
             "businessDirection": settings["businessDirection"],
             "businessDirectionLabel": settings["businessDirectionLabel"],
@@ -225,7 +225,15 @@ class HarnessPipeline:
 
     def _settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         xhs_config = self.config.get("xhs") or {}
+        douyin_config = self.config.get("douyin") or {}
         sales_config = self.config.get("sales") or {}
+        configured_platforms = enabled_platforms((self.config.get("platforms") or {}).get("enabled"))
+        payload_platforms = payload.get("platforms")
+        if payload_platforms is None and payload.get("platform"):
+            payload_platforms = [payload.get("platform")]
+        platforms = [item for item in enabled_platforms(payload_platforms or configured_platforms) if item in configured_platforms or payload_platforms]
+        if not platforms:
+            platforms = configured_platforms or ["xhs"]
         direction = str(payload.get("businessDirection") or sales_config.get("default_business_direction") or "cloud_ai")
         direction_label = BUSINESS_DIRECTIONS.get(direction, BUSINESS_DIRECTIONS["cloud_ai"])["label"]
         demand_description = str(
@@ -243,8 +251,14 @@ class HarnessPipeline:
         delay_min = min(max(float(payload.get("delayMin", xhs_config.get("read_delay_min", 7.0))), 0.0), 120.0)
         delay_max = min(max(float(payload.get("delayMax", xhs_config.get("read_delay_max", 60.0))), delay_min), 120.0)
         max_comments = min(max(int(payload.get("maxCommentsPerNote", xhs_config.get("max_comments_per_note", 50))), 1), 500)
+        max_comments_by_platform = {
+            "xhs": max_comments,
+            "douyin": min(max(int(payload.get("maxCommentsPerPost", douyin_config.get("max_comments_per_post", max_comments))), 1), 500),
+        }
         geo_constraints = self._geo_constraints(demand_description, str(payload.get("region") or "").strip())
         return {
+            "platforms": platforms,
+            "platformLabels": [self._platform_label(platform) for platform in platforms],
             "businessDirection": direction,
             "businessDirectionLabel": direction_label,
             "demandDescription": demand_description,
@@ -260,6 +274,7 @@ class HarnessPipeline:
             "delayMin": delay_min,
             "delayMax": delay_max,
             "maxCommentsPerNote": max_comments,
+            "maxCommentsByPlatform": max_comments_by_platform,
             "geoConstraints": geo_constraints,
             "redactUser": bool(sales_config.get("redact_user", False)),
             "userConstraints": {
@@ -273,11 +288,35 @@ class HarnessPipeline:
                 "readDetail": bool(payload.get("readDetail", True)),
                 "scanLeads": bool(payload.get("scanLeads", True)),
                 "maxCommentsPerNote": max_comments,
+                "platforms": platforms,
+                "platformLabels": [self._platform_label(platform) for platform in platforms],
                 "geoConstraints": geo_constraints,
                 "legacyBusinessDirection": direction,
                 "legacyBusinessDirectionLabel": direction_label,
             },
         }
+
+    def _ensure_platforms_ready(self, settings: dict[str, Any], emit: Any) -> None:
+        for platform in settings.get("platforms") or ["xhs"]:
+            adapter = self._adapter_for(platform)
+            label = self._platform_label(platform)
+            if platform == "xhs":
+                emit("info", "登录检查", f"检查{label}登录态...")
+            else:
+                emit("info", "登录检查", f"检查{label}只读数据源配置...")
+            adapter.ensure_authenticated()
+            if platform == "xhs":
+                emit("success", "登录检查", f"{label}登录态有效。")
+            else:
+                emit("success", "登录检查", f"{label}只读数据源可用。")
+
+    def _adapter_for(self, platform: str) -> Any:
+        if hasattr(self.adapter, "adapter_for"):
+            return self.adapter.adapter_for(platform)
+        return self.adapter
+
+    def _platform_label(self, platform: str) -> str:
+        return {"xhs": "小红书", "douyin": "抖音"}.get(str(platform or ""), str(platform or "未知平台"))
 
     def _keywords(self, planning: dict[str, Any]) -> list[str]:
         keywords = [str(item).strip() for item in planning.get("keywords") or [] if str(item).strip()]
@@ -304,66 +343,80 @@ class HarnessPipeline:
         notes: list[dict[str, Any]] = []
         seen: set[str] = set()
         now = time.time()
+        platforms = settings.get("platforms") or ["xhs"]
+        total_steps = max(1, len(keywords) * len(platforms))
+        step = 0
         for index, keyword in enumerate(keywords, 1):
+            for platform in platforms:
+                if stop_checker and stop_checker():
+                    break
+                step += 1
+                label = self._platform_label(platform)
+                emit("info", "工具 Harness", f"只读搜索{label}「{keyword}」第 {page} 页...")
+                raw = self._adapter_for(platform).search(keyword, page=page)
+                items = (raw.get("data") or {}).get("items") or []
+                audit_items = []
+                for item in items:
+                    note = extract_note({**item, "platform": platform})
+                    if not note:
+                        audit_items.append({
+                            "platform": platform,
+                            "stage": "search",
+                            "entity_type": "note",
+                            "entity_id": str(item.get("id") or ""),
+                            "source_keyword": keyword,
+                            "decision": "parse_failed",
+                            "reason": f"{label}搜索结果无法解析为有效作品。",
+                            "payload": {"rawId": item.get("id"), "modelType": item.get("model_type")},
+                        })
+                        continue
+                    note["platform"] = platform
+                    dedupe_id = f"{platform}:{note['id']}"
+                    if dedupe_id in seen:
+                        audit_items.append({
+                            "platform": platform,
+                            "stage": "search",
+                            "entity_type": "note",
+                            "entity_id": note["id"],
+                            "note_id": note["id"],
+                            "source_keyword": keyword,
+                            "decision": "dropped_duplicate",
+                            "reason": "同一任务中该作品已由其他关键词命中。",
+                            "payload": self._note_brief(note),
+                        })
+                        continue
+                    if not within_time_filter(note, settings["timeFilter"], now):
+                        audit_items.append({
+                            "platform": platform,
+                            "stage": "search",
+                            "entity_type": "note",
+                            "entity_id": note["id"],
+                            "note_id": note["id"],
+                            "source_keyword": keyword,
+                            "decision": "dropped_time_filter",
+                            "reason": f"发布时间不满足时效过滤：{settings['timeFilter']}。",
+                            "payload": self._note_brief(note),
+                        })
+                        continue
+                    note["source_keyword"] = keyword
+                    seen.add(dedupe_id)
+                    notes.append(note)
+                    audit_items.append({
+                        "platform": platform,
+                        "stage": "search",
+                        "entity_type": "note",
+                        "entity_id": note["id"],
+                        "note_id": note["id"],
+                        "source_keyword": keyword,
+                        "decision": "collected",
+                        "reason": f"{label}搜索返回并通过基础去重与时效过滤，进入 LLM 相关性判断池。",
+                        "payload": self._note_brief(note),
+                    })
+                self._save_audit(task_id, audit_items)
+                progress({"stage": "search", "percent": 10 + int(18 * step / total_steps), "current": step, "total": total_steps})
+                emit("success", "工具 Harness", f"{label}搜索「{keyword}」返回 {len(items)} 条，进入 LLM 相关性判断池。")
             if stop_checker and stop_checker():
                 break
-            emit("info", "工具 Harness", f"只读搜索「{keyword}」第 {page} 页...")
-            raw = self.adapter.search(keyword, page=page)
-            items = (raw.get("data") or {}).get("items") or []
-            audit_items = []
-            for item in items:
-                note = extract_note(item)
-                if not note:
-                    audit_items.append({
-                        "stage": "search",
-                        "entity_type": "note",
-                        "entity_id": str(item.get("id") or ""),
-                        "source_keyword": keyword,
-                        "decision": "parse_failed",
-                        "reason": "搜索结果无法解析为有效笔记。",
-                        "payload": {"rawId": item.get("id"), "modelType": item.get("model_type")},
-                    })
-                    continue
-                if note["id"] in seen:
-                    audit_items.append({
-                        "stage": "search",
-                        "entity_type": "note",
-                        "entity_id": note["id"],
-                        "note_id": note["id"],
-                        "source_keyword": keyword,
-                        "decision": "dropped_duplicate",
-                        "reason": "同一任务中该笔记已由其他关键词命中。",
-                        "payload": self._note_brief(note),
-                    })
-                    continue
-                if not within_time_filter(note, settings["timeFilter"], now):
-                    audit_items.append({
-                        "stage": "search",
-                        "entity_type": "note",
-                        "entity_id": note["id"],
-                        "note_id": note["id"],
-                        "source_keyword": keyword,
-                        "decision": "dropped_time_filter",
-                        "reason": f"发布时间不满足时效过滤：{settings['timeFilter']}。",
-                        "payload": self._note_brief(note),
-                    })
-                    continue
-                note["source_keyword"] = keyword
-                seen.add(note["id"])
-                notes.append(note)
-                audit_items.append({
-                    "stage": "search",
-                    "entity_type": "note",
-                    "entity_id": note["id"],
-                    "note_id": note["id"],
-                    "source_keyword": keyword,
-                    "decision": "collected",
-                    "reason": "搜索返回并通过基础去重与时效过滤，进入 LLM 相关性判断池。",
-                    "payload": self._note_brief(note),
-                })
-            self._save_audit(task_id, audit_items)
-            progress({"stage": "search", "percent": 10 + int(18 * index / max(1, len(keywords))), "current": index, "total": len(keywords)})
-            emit("success", "工具 Harness", f"搜索「{keyword}」返回 {len(items)} 条，进入 LLM 相关性判断池。")
         notes.sort(key=lambda note: note.get(settings["metric"], 0), reverse=True)
         return notes[: settings["count"] * max(2, len(keywords))]
 
@@ -497,11 +550,14 @@ class HarnessPipeline:
                 emit("info", "延迟保护", f"合规延迟后读取详情：{note.get('title', '')[:24]}")
                 time.sleep(random.uniform(settings["delayMin"], settings["delayMax"]))
             try:
-                emit("info", "工具 Harness", f"只读读取详情 {idx + 1}/{len(notes)}：{note.get('title', '')[:24]}")
-                detail_raw = self.adapter.read_note(note["id"])
+                platform = str(note.get("platform") or "xhs")
+                emit("info", "工具 Harness", f"只读读取{self._platform_label(platform)}详情 {idx + 1}/{len(notes)}：{note.get('title', '')[:24]}")
+                detail_raw = self._adapter_for(platform).read_note(note["id"])
                 detail_items = (detail_raw.get("data") or {}).get("items") or []
-                detail = extract_note(detail_items[0]) if detail_items else None
-                enriched.append(merge_note(note, detail))
+                detail = extract_note({**detail_items[0], "platform": platform}) if detail_items else None
+                merged = merge_note(note, detail)
+                merged["platform"] = platform
+                enriched.append(merged)
             except Exception as exc:
                 note["read_error"] = str(exc)[:300]
                 enriched.append(note)
@@ -527,14 +583,16 @@ class HarnessPipeline:
                 emit("info", "延迟保护", f"合规延迟后读取评论：{note.get('title', '')[:24]}")
                 time.sleep(random.uniform(settings["delayMin"], settings["delayMax"]))
             try:
-                max_comments = int(settings.get("maxCommentsPerNote") or 50)
-                emit("info", "工具 Harness", f"只读扫描评论 {idx + 1}/{len(notes)}：{note.get('title', '')[:24]}（最多 {max_comments} 条）")
+                platform = str(note.get("platform") or "xhs")
+                max_comments = int((settings.get("maxCommentsByPlatform") or {}).get(platform) or settings.get("maxCommentsPerNote") or 50)
+                label = self._platform_label(platform)
+                emit("info", "工具 Harness", f"只读扫描{label}评论 {idx + 1}/{len(notes)}：{note.get('title', '')[:24]}（最多 {max_comments} 条）")
                 cursor = ""
                 note_seen: set[str] = set()
                 note_scanned = 0
                 pages = 0
                 while note_scanned < max_comments:
-                    raw = self.adapter.comments(note["id"], cursor=cursor)
+                    raw = self._adapter_for(platform).comments(note["id"], cursor=cursor)
                     page_data = raw.get("data") or raw
                     raw_comments = page_data.get("comments") or []
                     pages += 1
@@ -543,7 +601,7 @@ class HarnessPipeline:
                     for comment in raw_comments:
                         if note_scanned >= max_comments:
                             break
-                        normalized = self._comment_brief(comment, note, settings)
+                        normalized = self._comment_brief({**comment, "platform": platform}, note, settings)
                         if normalized["comment_id"] in note_seen:
                             continue
                         note_seen.add(normalized["comment_id"])
@@ -551,7 +609,7 @@ class HarnessPipeline:
                         note_scanned += 1
                         total += 1
                         if self.storage and task_id:
-                            self.storage.save_comment(task_id, note["id"], {**comment, "id": normalized["comment_id"]})
+                            self.storage.save_comment(task_id, note["id"], {**comment, "id": normalized["comment_id"], "platform": platform})
                     if note_scanned >= max_comments:
                         break
                     cursor = str(page_data.get("cursor") or "")
@@ -776,6 +834,7 @@ class HarnessPipeline:
             lead["outreach_copy"] = update.get("outreach_copy") or lead.get("outreach_copy") or ""
             lead["product_reason"] = update.get("reason") or ""
             audit_items.append({
+                "platform": lead.get("platform") or "xhs",
                 "stage": "product_strategy",
                 "entity_type": "lead",
                 "entity_id": lead.get("lead_id"),
@@ -1201,6 +1260,7 @@ class HarnessPipeline:
         if lead:
             score = min(max(int(lead.get("score") or score), 0), 100)
         return {
+            "platform": comment.get("platform") or (note.get("platform") if isinstance(note, dict) else "xhs"),
             "stage": "lead_signal",
             "entity_type": "note" if comment.get("lead_type") == "note_author" else "comment",
             "entity_id": comment.get("candidate_id") or comment.get("comment_id") or decision.get("comment_id") or "",
@@ -1215,6 +1275,7 @@ class HarnessPipeline:
             "risk": decision.get("risk") or "",
             "payload": {
                 "comment": {
+                    "platform": comment.get("platform") or "xhs",
                     "candidate_id": comment.get("candidate_id"),
                     "lead_type": comment.get("lead_type", "comment_lead"),
                     "comment_id": comment.get("comment_id"),
@@ -1246,6 +1307,8 @@ class HarnessPipeline:
             note_id = str(note.get("id") or "")
             if not note_id:
                 continue
+            platform = str(note.get("platform") or "xhs")
+            candidate_id = f"note:{note_id}" if platform == "xhs" else f"{platform}:note:{note_id}"
             content = "；".join(
                 item for item in [
                     str(note.get("title") or "").strip(),
@@ -1253,12 +1316,16 @@ class HarnessPipeline:
                 ] if item
             )
             candidates.append({
-                "candidate_id": f"note:{note_id}",
+                "platform": platform,
+                "candidate_id": candidate_id,
                 "lead_type": "note_author",
                 "comment_id": "",
                 "note_id": note_id,
+                "post_id": note.get("post_id") or note_id,
                 "nickname": note.get("author") or "",
                 "user_id": note.get("author_user_id") or "",
+                "target_user_id": note.get("author_user_id") or "",
+                "profile_url": self._profile_url(platform, note.get("author_user_id") or ""),
                 "content": content[:1200],
                 "ip": "",
                 "note": self._note_brief(note),
@@ -1345,20 +1412,26 @@ class HarnessPipeline:
 
     def _lead_from_decision(self, comment: dict[str, Any], decision: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
         note = comment.get("note") or {}
+        platform = str(comment.get("platform") or note.get("platform") or "xhs")
         user_id = str(comment.get("user_id") or "")
         nickname = str(comment.get("nickname") or "")
         lead_type = str(comment.get("lead_type") or decision.get("lead_type") or "comment_lead")
         if lead_type == "note_author":
             lead_id = str(comment.get("candidate_id") or f"note:{comment.get('note_id')}")
         else:
-            lead_id = f"{comment.get('note_id')}:{comment.get('comment_id')}"
+            base_lead_id = f"{comment.get('note_id')}:{comment.get('comment_id')}"
+            lead_id = base_lead_id if platform == "xhs" else f"{platform}:{base_lead_id}"
         score = min(max(int(decision.get("score") or 0), 0), 100)
         priority = str(decision.get("priority") or _priority_from_score(score)).upper()[:1]
         evidence = self._text_value(decision.get("evidence"), comment.get("content", ""))
         return {
+            "platform": platform,
             "lead_id": lead_id,
             "lead_type": "note_author" if lead_type == "note_author" else "comment_lead",
             "comment_id": comment.get("comment_id"),
+            "post_id": comment.get("post_id") or comment.get("note_id"),
+            "target_user_id": user_id,
+            "profile_url": comment.get("profile_url") or self._profile_url(platform, user_id),
             "user_id": redact_text(user_id, 4) if settings["redactUser"] else user_id,
             "nickname": redact_text(nickname, 1) if settings["redactUser"] else nickname,
             "raw_user_id": "" if settings["redactUser"] else user_id,
@@ -1386,16 +1459,22 @@ class HarnessPipeline:
         }
 
     def _comment_brief(self, comment: dict[str, Any], note: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+        platform = str(comment.get("platform") or note.get("platform") or "xhs")
         user_info = comment.get("user_info") or {}
         content = str(comment.get("content") or "")
         comment_id = str(comment.get("id") or abs(hash(f"{note.get('id')}:{content}")))
+        target_user_id = user_info.get("sec_user_id") or user_info.get("user_id") or ""
         return {
+            "platform": platform,
             "candidate_id": comment_id,
             "lead_type": "comment_lead",
             "comment_id": comment_id,
             "note_id": note.get("id"),
+            "post_id": note.get("post_id") or note.get("id"),
             "nickname": user_info.get("nickname") or user_info.get("nick_name") or "",
-            "user_id": user_info.get("user_id") or "",
+            "user_id": target_user_id,
+            "target_user_id": target_user_id,
+            "profile_url": self._profile_url(platform, target_user_id),
             "content": content,
             "ip": comment.get("ip_location", ""),
             "note": self._note_brief(note),
@@ -1403,11 +1482,14 @@ class HarnessPipeline:
 
     def _note_brief(self, note: dict[str, Any]) -> dict[str, Any]:
         return {
+            "platform": note.get("platform") or "xhs",
             "note_id": note.get("id"),
+            "post_id": note.get("post_id") or note.get("id"),
             "title": note.get("title"),
             "desc": str(note.get("desc") or "")[:800],
             "tags": note.get("tags") or [],
             "author": note.get("author"),
+            "author_user_id": note.get("author_user_id", ""),
             "publish_date": note.get("publish_date"),
             "liked": note.get("liked", 0),
             "collected": note.get("collected", 0),
@@ -1418,6 +1500,16 @@ class HarnessPipeline:
             "source_keyword": note.get("source_keyword", ""),
             "scanned_comments_count": note.get("scanned_comments_count", 0),
         }
+
+    def _profile_url(self, platform: str, user_id: Any) -> str:
+        target = str(user_id or "").strip()
+        if not target:
+            return ""
+        if target.startswith("http://") or target.startswith("https://"):
+            return target
+        if platform == "douyin":
+            return f"https://www.douyin.com/user/{target}"
+        return f"https://www.xiaohongshu.com/user/profile/{target}"
 
     def _audit_from_trace(self, trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [
@@ -1430,10 +1522,16 @@ class HarnessPipeline:
         ]
 
     def _safety(self, settings: dict[str, Any]) -> dict[str, Any]:
+        commands = {}
+        for platform in settings.get("platforms") or ["xhs"]:
+            adapter = self._adapter_for(platform)
+            commands[platform] = " ".join(getattr(adapter, "command", []))
         return {
             "mode": "read-only",
-            "actions": "task collection uses status/search/read/comments only; no automatic like/favorite/comment/follow/post/private message. Follow is only allowed from the UI after per-lead user confirmation; private messages are draft-only and never auto-sent.",
-            "xhsCommand": " ".join(getattr(self.adapter, "command", [])),
+            "platforms": settings.get("platforms") or ["xhs"],
+            "actions": "collection only reads search/detail/comments. Follow and Douyin DM are only allowed from the UI after per-lead user confirmation and the matching platform setting is enabled; no batch outreach.",
+            "xhsCommand": commands.get("xhs", ""),
+            "commands": commands,
             "delayMin": settings.get("delayMin"),
             "delayMax": settings.get("delayMax"),
         }
