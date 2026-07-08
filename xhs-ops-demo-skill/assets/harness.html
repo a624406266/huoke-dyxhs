@@ -547,6 +547,9 @@
             <input id="settingDelayMin" type="number" min="0" max="120" value="7" />
             <input id="settingDelayMax" type="number" min="0" max="120" value="60" />
           </div>
+          <label for="settingMaxComments">每篇最多扫描评论数</label>
+          <input id="settingMaxComments" type="number" min="1" max="500" value="50" />
+          <div class="field-help">默认 50。数值越高召回越多，但任务会更慢，也更容易遇到验证码或风控。</div>
         </div>
       </section>
     </section>
@@ -1290,6 +1293,7 @@
         $('settingXhsBin').value = s.xhs?.bin || '';
         $('settingDelayMin').value = s.xhs?.read_delay_min ?? 7;
         $('settingDelayMax').value = s.xhs?.read_delay_max ?? 60;
+        $('settingMaxComments').value = s.xhs?.max_comments_per_note ?? 50;
         $('settingRedactUser').checked = Boolean(s.sales?.redact_user);
         settingsLoaded = true;
       } catch (err) {
@@ -1317,7 +1321,8 @@
           xhs: {
             bin: $('settingXhsBin').value.trim(),
             read_delay_min: Number($('settingDelayMin').value || 7),
-            read_delay_max: Number($('settingDelayMax').value || 60)
+            read_delay_max: Number($('settingDelayMax').value || 60),
+            max_comments_per_note: Number($('settingMaxComments').value || 50)
           },
           sales: {
             redact_user: $('settingRedactUser').checked

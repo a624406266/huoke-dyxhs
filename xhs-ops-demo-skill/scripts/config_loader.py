@@ -22,6 +22,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "read_delay_min": 7.0,
         "read_delay_max": 60.0,
         "max_count": 20,
+        "max_comments_per_note": 50,
     },
     "llm": {
         "api_key": "",
@@ -124,6 +125,7 @@ def public_settings(config: dict[str, Any]) -> dict[str, Any]:
             "bin": xhs.get("bin", ""),
             "read_delay_min": xhs.get("read_delay_min", 7.0),
             "read_delay_max": xhs.get("read_delay_max", 60.0),
+            "max_comments_per_note": xhs.get("max_comments_per_note", 50),
         },
         "sales": {
             "redact_user": bool(sales.get("redact_user", False)),
@@ -160,6 +162,8 @@ def update_local_settings(payload: dict[str, Any]) -> dict[str, Any]:
         xhs["read_delay_min"] = float(xhs_payload.get("read_delay_min") or 7.0)
     if "read_delay_max" in xhs_payload:
         xhs["read_delay_max"] = float(xhs_payload.get("read_delay_max") or 60.0)
+    if "max_comments_per_note" in xhs_payload:
+        xhs["max_comments_per_note"] = min(max(int(xhs_payload.get("max_comments_per_note") or 50), 1), 500)
 
     sales = local_config.setdefault("sales", {})
     if "redact_user" in sales_payload:

@@ -149,5 +149,8 @@ class XhsAdapter:
     def read_note(self, note_id: str) -> dict[str, Any]:
         return self.run(["read", note_id, "--json"], timeout=90)
 
-    def comments(self, note_id: str) -> dict[str, Any]:
-        return self.run(["comments", note_id, "--json"], timeout=90)
+    def comments(self, note_id: str, cursor: str = "") -> dict[str, Any]:
+        args = ["comments", note_id, "--json"]
+        if cursor:
+            args.extend(["--cursor", cursor])
+        return self.run(args, timeout=90)

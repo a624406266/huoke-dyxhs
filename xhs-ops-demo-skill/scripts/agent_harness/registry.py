@@ -13,7 +13,8 @@ class PromptRegistry:
         if not self.storage:
             return
         for spec in agent_specs():
-            self.storage.ensure_prompt_version(
+            active = self.storage.get_active_prompt(spec.key)
+            prompt_id = self.storage.ensure_prompt_version(
                 agent_key=spec.key,
                 agent_name=spec.name,
                 version=spec.version,
@@ -22,6 +23,8 @@ class PromptRegistry:
                 score=0.82,
                 notes="Built-in Harness prompt.",
             )
+            if active and active.get("version") != spec.version and active.get("notes") == "Built-in Harness prompt.":
+                self.storage.promote_prompt_version(prompt_id)
 
     def active_prompt(self, agent_key: str) -> dict[str, Any]:
         spec = self.spec(agent_key)

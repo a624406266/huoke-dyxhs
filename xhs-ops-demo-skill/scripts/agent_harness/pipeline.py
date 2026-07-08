@@ -97,7 +97,7 @@ class HarnessPipeline:
         leads = self._judge_leads(runner, selected, comments, settings, task_id, stop_checker, emit)
 
         progress({"stage": "product_strategy", "percent": 76, "current": 0, "total": len(leads)})
-        leads, distribution = self._apply_product_strategy(runner, leads, selected, settings, emit)
+        leads, distribution = self._apply_product_strategy(runner, leads, selected, settings, task_id, emit)
 
         progress({"stage": "qa", "percent": 84, "current": 0, "total": 1})
         qa = self._run_qa(runner, selected, leads, distribution, settings, emit)
@@ -132,6 +132,8 @@ class HarnessPipeline:
             "metric": settings["metric"],
             "metricLabel": METRIC_LABELS[settings["metric"]],
             "count": len(selected),
+            "scannedCommentsCount": total_comments,
+            "maxCommentsPerNote": settings["maxCommentsPerNote"],
             "notes": selected,
             "leads": {
                 "keyword": "、".join(keywords),
@@ -172,6 +174,8 @@ class HarnessPipeline:
         min_score = min(max(int(payload.get("minScore", sales_config.get("default_min_score", 60))), 0), 100)
         delay_min = min(max(float(payload.get("delayMin", xhs_config.get("read_delay_min", 7.0))), 0.0), 120.0)
         delay_max = min(max(float(payload.get("delayMax", xhs_config.get("read_delay_max", 60.0))), delay_min), 120.0)
+        max_comments = min(max(int(payload.get("maxCommentsPerNote", xhs_config.get("max_comments_per_note", 50))), 1), 500)
+        geo_constraints = self._geo_constraints(demand_description, str(payload.get("region") or "").strip())
         return {
             "businessDirection": direction,
             "businessDirectionLabel": direction_label,
@@ -187,6 +191,8 @@ class HarnessPipeline:
             "scanLeads": bool(payload.get("scanLeads", True)),
             "delayMin": delay_min,
             "delayMax": delay_max,
+            "maxCommentsPerNote": max_comments,
+            "geoConstraints": geo_constraints,
             "redactUser": bool(sales_config.get("redact_user", False)),
             "userConstraints": {
                 "industry": str(payload.get("industry") or "").strip(),
@@ -198,6 +204,8 @@ class HarnessPipeline:
                 "timeFilter": str(payload.get("timeFilter") or "all"),
                 "readDetail": bool(payload.get("readDetail", True)),
                 "scanLeads": bool(payload.get("scanLeads", True)),
+                "maxCommentsPerNote": max_comments,
+                "geoConstraints": geo_constraints,
                 "legacyBusinessDirection": direction,
                 "legacyBusinessDirectionLabel": direction_label,
             },
@@ -310,9 +318,42 @@ class HarnessPipeline:
             "strategy": self._strategy_context(settings, planning),
             "hypotheses": planning.get("hypotheses", []),
             "notes": [self._note_brief(note) for note in notes],
+            "outputContract": {
+                "coverage": "Return one notes[] item for every input note_id.",
+                "decisions": ["keep", "drop"],
+            },
         }
         result = runner.run("relevance_agent", payload, purpose="批量笔记相关性判断")
-        decisions = {str(item.get("note_id")): item for item in result.get("notes") or []}
+        decisions = self._note_decisions(result.get("notes") or [], coverage_status="initial")
+        missing_notes = [note for note in notes if str(note.get("id")) not in decisions]
+        if missing_notes:
+            emit("info", "相关性判断 Agent", f"补齐 {len(missing_notes)} 篇缺失相关性判断...")
+            for chunk in self._chunks(missing_notes, 12):
+                if stop_checker and stop_checker():
+                    break
+                retry = runner.run(
+                    "relevance_agent",
+                    {
+                        "reviewMode": "missing_batch",
+                        "demandDescription": settings["demandDescription"],
+                        "businessDirection": settings["businessDirectionLabel"],
+                        "strategy": self._strategy_context(settings, planning),
+                        "hypotheses": planning.get("hypotheses", []),
+                        "notes": [self._note_brief(note) for note in chunk],
+                        "outputContract": {
+                            "coverage": "Return one notes[] item for every input note_id. Do not omit low-confidence or drop decisions.",
+                            "decisions": ["keep", "drop"],
+                        },
+                    },
+                    purpose="相关性缺失决策补齐",
+                )
+                decisions.update(self._note_decisions(retry.get("notes") or [], coverage_status="retry"))
+            missing_notes = [note for note in notes if str(note.get("id")) not in decisions]
+            emit(
+                "success" if not missing_notes else "warning",
+                "相关性判断 Agent",
+                f"相关性覆盖率 {len(notes) - len(missing_notes)}/{len(notes)}。",
+            )
         selected = []
         audit_items = []
         for note in notes:
@@ -332,7 +373,11 @@ class HarnessPipeline:
                 "reason": decision.get("reason") or ("相关性 Agent 未返回该笔记判断。" if final_decision == "missing_decision" else ""),
                 "evidence": decision.get("evidence") or [],
                 "confidence": decision.get("confidence"),
-                "payload": {"note": self._note_brief(note), "decision": decision},
+                "payload": {
+                    "note": self._note_brief(note),
+                    "decision": decision,
+                    "coverage_status": decision.get("coverage_status") or ("missing_after_retry" if final_decision == "missing_decision" else "initial"),
+                },
             })
         self._save_audit(task_id, audit_items)
         review_targets = [
@@ -414,15 +459,38 @@ class HarnessPipeline:
                 emit("info", "延迟保护", f"合规延迟后读取评论：{note.get('title', '')[:24]}")
                 time.sleep(random.uniform(settings["delayMin"], settings["delayMax"]))
             try:
-                emit("info", "工具 Harness", f"只读扫描评论 {idx + 1}/{len(notes)}：{note.get('title', '')[:24]}")
-                raw = self.adapter.comments(note["id"])
-                raw_comments = (raw.get("data") or {}).get("comments") or []
-                total += len(raw_comments)
-                for comment in raw_comments:
-                    normalized = self._comment_brief(comment, note, settings)
-                    comments.append(normalized)
-                    if self.storage and task_id:
-                        self.storage.save_comment(task_id, note["id"], {**comment, "id": normalized["comment_id"]})
+                max_comments = int(settings.get("maxCommentsPerNote") or 50)
+                emit("info", "工具 Harness", f"只读扫描评论 {idx + 1}/{len(notes)}：{note.get('title', '')[:24]}（最多 {max_comments} 条）")
+                cursor = ""
+                note_seen: set[str] = set()
+                note_scanned = 0
+                pages = 0
+                while note_scanned < max_comments:
+                    raw = self.adapter.comments(note["id"], cursor=cursor)
+                    page_data = raw.get("data") or raw
+                    raw_comments = page_data.get("comments") or []
+                    pages += 1
+                    if not raw_comments:
+                        break
+                    for comment in raw_comments:
+                        if note_scanned >= max_comments:
+                            break
+                        normalized = self._comment_brief(comment, note, settings)
+                        if normalized["comment_id"] in note_seen:
+                            continue
+                        note_seen.add(normalized["comment_id"])
+                        comments.append(normalized)
+                        note_scanned += 1
+                        total += 1
+                        if self.storage and task_id:
+                            self.storage.save_comment(task_id, note["id"], {**comment, "id": normalized["comment_id"]})
+                    if note_scanned >= max_comments:
+                        break
+                    cursor = str(page_data.get("cursor") or "")
+                    if not page_data.get("has_more") or not cursor:
+                        break
+                note["scanned_comments_count"] = note_scanned
+                note["comment_pages_fetched"] = pages
             except Exception as exc:
                 note["comment_error"] = str(exc)[:300]
                 emit("warning", "工具 Harness", f"评论扫描失败：{note.get('title', '')[:24]}", {"error": str(exc)[:300]})
@@ -439,9 +507,10 @@ class HarnessPipeline:
         stop_checker: Any | None,
         emit: Any,
     ) -> list[dict[str, Any]]:
-        if not comments:
+        lead_candidates = [*comments, *self._note_author_candidates(notes, settings)]
+        if not lead_candidates:
             return []
-        emit("info", "线索识别 Agent", f"LLM 批量识别 {len(comments)} 条评论销售意图...")
+        emit("info", "线索识别 Agent", f"LLM 批量识别 {len(lead_candidates)} 个评论/作者候选销售意图...")
         result = runner.run(
             "lead_signal_agent",
             {
@@ -449,25 +518,73 @@ class HarnessPipeline:
                 "businessDirection": settings["businessDirectionLabel"],
                 "strategy": self._strategy_context(settings, settings.get("planning") or {}),
                 "notes": [self._note_brief(n) for n in notes],
-                "comments": comments,
+                "comments": lead_candidates,
+                "leadCandidates": lead_candidates,
+                "outputContract": {
+                    "coverage": "Return one leads[] item for every input candidate_id.",
+                    "decisions": ["lead", "ignore", "below_threshold"],
+                    "requiredFields": ["candidate_id", "lead_type", "note_id", "comment_id", "decision", "score", "confidence", "reason", "risk"],
+                },
             },
             purpose="批量线索信号识别",
         )
-        by_comment = {str(item.get("comment_id")): item for item in result.get("leads") or []}
+        decisions = self._lead_decisions(result.get("leads") or [], lead_candidates, coverage_status="initial")
+        missing_candidates = [item for item in lead_candidates if item["candidate_id"] not in decisions]
+        if missing_candidates:
+            emit("info", "线索识别 Agent", f"补齐 {len(missing_candidates)} 个缺失线索判断...")
+            for chunk in self._chunks(missing_candidates, 20):
+                if stop_checker and stop_checker():
+                    break
+                retry = runner.run(
+                    "lead_signal_agent",
+                    {
+                        "reviewMode": "missing_batch",
+                        "demandDescription": settings["demandDescription"],
+                        "businessDirection": settings["businessDirectionLabel"],
+                        "strategy": self._strategy_context(settings, settings.get("planning") or {}),
+                        "notes": [self._note_brief(n) for n in notes],
+                        "comments": chunk,
+                        "leadCandidates": chunk,
+                        "outputContract": {
+                            "coverage": "Return one leads[] item for every input candidate_id, including ignore decisions.",
+                            "decisions": ["lead", "ignore", "below_threshold"],
+                            "requiredFields": ["candidate_id", "lead_type", "note_id", "comment_id", "decision", "score", "confidence", "reason", "risk"],
+                        },
+                    },
+                    purpose="线索缺失决策补齐",
+                )
+                decisions.update(self._lead_decisions(retry.get("leads") or [], chunk, coverage_status="retry"))
+            missing_candidates = [item for item in lead_candidates if item["candidate_id"] not in decisions]
+            emit(
+                "success" if not missing_candidates else "warning",
+                "线索识别 Agent",
+                f"线索判断覆盖率 {len(lead_candidates) - len(missing_candidates)}/{len(lead_candidates)}。",
+            )
         leads = []
         audit_items = []
-        for comment in comments:
-            decision = by_comment.get(str(comment.get("comment_id"))) or {}
+        for comment in lead_candidates:
+            decision = decisions.get(comment["candidate_id"]) or {}
             raw_decision = str(decision.get("decision", "")).lower()
             score = min(max(int(decision.get("score") or 0), 0), 100)
-            if raw_decision != "lead":
-                audit_items.append(self._lead_audit_item(comment, decision, "ignore", "线索识别 Agent 判断为非商机或未返回该评论。"))
+            if not decision:
+                audit_items.append(self._lead_audit_item(comment, decision, "missing_decision", "线索识别 Agent 首轮和补齐轮均未返回该候选判断。"))
                 continue
-            if score < settings["minScore"]:
+            if raw_decision not in {"lead", "below_threshold"}:
+                audit_items.append(self._lead_audit_item(comment, decision, "ignore", "线索识别 Agent 判断为非商机。"))
+                continue
+            if raw_decision == "below_threshold" or score < settings["minScore"]:
                 audit_items.append(self._lead_audit_item(comment, decision, "below_threshold", f"评分 {score} 低于阈值 {settings['minScore']}。"))
                 continue
-            audit_items.append(self._lead_audit_item(comment, decision, "lead", "达到线索阈值，进入产品策略阶段。"))
-            leads.append(self._lead_from_decision(comment, decision, settings))
+            lead = self._lead_from_decision(comment, decision, settings)
+            self._apply_geo_gate(lead, settings)
+            if int(lead.get("score") or 0) < settings["minScore"]:
+                audit_decision = dict(decision)
+                if lead.get("geo_status") == "mismatch" and lead.get("geo_reason"):
+                    audit_decision["reason"] = str(lead.get("geo_reason"))
+                audit_items.append(self._lead_audit_item(comment, audit_decision, "below_threshold", lead.get("geo_reason") or f"评分低于阈值 {settings['minScore']}。", lead=lead))
+                continue
+            audit_items.append(self._lead_audit_item(comment, decision, "lead", "达到线索阈值，进入产品策略阶段。", lead=lead))
+            leads.append(lead)
         self._save_audit(task_id, audit_items)
         review_targets = [
             lead for lead in leads
@@ -510,6 +627,7 @@ class HarnessPipeline:
         leads: list[dict[str, Any]],
         notes: list[dict[str, Any]],
         settings: dict[str, Any],
+        task_id: int | None,
         emit: Any,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if not leads:
@@ -524,10 +642,42 @@ class HarnessPipeline:
                 "leads": leads,
                 "notes": [self._note_brief(n) for n in notes],
                 "products": self._product_labels(),
+                "outputContract": {
+                    "coverage": "Return one lead_updates[] item for every input lead_id.",
+                    "requiredFields": ["lead_id", "recommended_products", "matched_products", "demand_summary", "outreach_copy", "reason"],
+                },
             },
             purpose="产品匹配与人工跟进话术",
         )
-        updates = {str(item.get("lead_id")): item for item in result.get("lead_updates") or []}
+        updates = self._product_updates(result.get("lead_updates") or [], coverage_status="initial")
+        missing_leads = [lead for lead in leads if str(lead.get("lead_id")) not in updates]
+        if missing_leads:
+            emit("info", "产品策略 Agent", f"补齐 {len(missing_leads)} 条缺失产品策略...")
+            retry = runner.run(
+                "product_strategy_agent",
+                {
+                    "reviewMode": "missing_batch",
+                    "demandDescription": settings["demandDescription"],
+                    "businessDirection": settings["businessDirectionLabel"],
+                    "strategy": self._strategy_context(settings, settings.get("planning") or {}),
+                    "leads": missing_leads,
+                    "notes": [self._note_brief(n) for n in notes],
+                    "products": self._product_labels(),
+                    "outputContract": {
+                        "coverage": "Return one lead_updates[] item for every input lead_id. Include note_author leads.",
+                        "requiredFields": ["lead_id", "recommended_products", "matched_products", "demand_summary", "outreach_copy", "reason"],
+                    },
+                },
+                purpose="产品策略缺失补齐",
+            )
+            updates.update(self._product_updates(retry.get("lead_updates") or [], coverage_status="retry"))
+            missing_leads = [lead for lead in leads if str(lead.get("lead_id")) not in updates]
+            emit(
+                "success" if not missing_leads else "warning",
+                "产品策略 Agent",
+                f"产品策略覆盖率 {len(leads) - len(missing_leads)}/{len(leads)}。",
+            )
+        audit_items = []
         for lead in leads:
             update = updates.get(str(lead.get("lead_id"))) or {}
             lead["recommended_products"] = update.get("recommended_products") or lead.get("recommended_products") or ""
@@ -535,7 +685,29 @@ class HarnessPipeline:
             lead["demand_summary"] = update.get("demand_summary") or lead.get("demand_summary") or ""
             lead["outreach_copy"] = update.get("outreach_copy") or lead.get("outreach_copy") or ""
             lead["product_reason"] = update.get("reason") or ""
-        distribution = result.get("productDistribution") or product_distribution(leads)
+            audit_items.append({
+                "stage": "product_strategy",
+                "entity_type": "lead",
+                "entity_id": lead.get("lead_id"),
+                "note_id": lead.get("note_id"),
+                "source_keyword": (lead.get("source_comment") or {}).get("note", {}).get("source_keyword", ""),
+                "decision": "updated" if update else "missing_decision",
+                "reason": update.get("reason") or "产品策略 Agent 未返回该线索的产品匹配结果，保留原始线索待人工确认。",
+                "evidence": lead.get("evidence") or "",
+                "score": lead.get("score"),
+                "confidence": lead.get("confidence"),
+                "priority": lead.get("priority"),
+                "risk": lead.get("risk") or "",
+                "payload": {
+                    "lead_id": lead.get("lead_id"),
+                    "lead_type": lead.get("lead_type"),
+                    "geo_status": lead.get("geo_status"),
+                    "coverage_status": update.get("coverage_status") or ("missing_after_retry" if not update else "initial"),
+                    "update": update,
+                },
+            })
+        distribution = product_distribution(leads)
+        self._save_audit(task_id, audit_items)
         emit("success", "产品策略 Agent", f"完成 {len(distribution)} 个产品方向匹配。")
         return leads, distribution
 
@@ -677,24 +849,90 @@ class HarnessPipeline:
         if self.storage and task_id and items:
             self.storage.save_audit_decisions(task_id, items)
 
+    def _chunks(self, items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
+        return [items[index:index + size] for index in range(0, len(items), max(1, size))]
+
+    def _note_decisions(self, items: list[dict[str, Any]], coverage_status: str) -> dict[str, dict[str, Any]]:
+        decisions: dict[str, dict[str, Any]] = {}
+        for item in items:
+            note_id = str(item.get("note_id") or item.get("id") or "").strip()
+            if not note_id:
+                continue
+            normalized = dict(item)
+            normalized["coverage_status"] = coverage_status
+            decisions[note_id] = normalized
+        return decisions
+
+    def _lead_decisions(
+        self,
+        items: list[dict[str, Any]],
+        candidates: list[dict[str, Any]],
+        coverage_status: str,
+    ) -> dict[str, dict[str, Any]]:
+        by_comment = {str(item.get("comment_id")): item["candidate_id"] for item in candidates if item.get("comment_id")}
+        by_note_author = {
+            str(item.get("note_id")): item["candidate_id"]
+            for item in candidates
+            if item.get("lead_type") == "note_author"
+        }
+        decisions: dict[str, dict[str, Any]] = {}
+        for item in items:
+            candidate_id = str(item.get("candidate_id") or item.get("lead_id") or "").strip()
+            if not candidate_id and item.get("comment_id"):
+                candidate_id = by_comment.get(str(item.get("comment_id")), "")
+            if not candidate_id and str(item.get("lead_type") or "") == "note_author":
+                candidate_id = by_note_author.get(str(item.get("note_id")), "")
+            if not candidate_id and not item.get("comment_id") and item.get("note_id"):
+                candidate_id = by_note_author.get(str(item.get("note_id")), "")
+            if not candidate_id:
+                continue
+            normalized = dict(item)
+            normalized["candidate_id"] = candidate_id
+            normalized.setdefault("lead_type", "note_author" if candidate_id.startswith("note:") else "comment_lead")
+            normalized["coverage_status"] = coverage_status
+            decisions[candidate_id] = normalized
+        return decisions
+
+    def _product_updates(self, items: list[dict[str, Any]], coverage_status: str) -> dict[str, dict[str, Any]]:
+        updates: dict[str, dict[str, Any]] = {}
+        for item in items:
+            lead_id = str(item.get("lead_id") or "").strip()
+            if not lead_id:
+                continue
+            normalized = dict(item)
+            normalized["coverage_status"] = coverage_status
+            updates[lead_id] = normalized
+        return updates
+
     def _strategy_context(self, settings: dict[str, Any], planning: dict[str, Any]) -> dict[str, Any]:
         return {
             "demandDescription": settings.get("demandDescription", ""),
             "userConstraints": settings.get("userConstraints", {}),
+            "geoConstraints": settings.get("geoConstraints", {}),
             "strategySummary": planning.get("strategy_summary") or planning.get("decision") or "",
             "targetCustomerProfile": planning.get("target_customer_profile") or "",
+            "planningGeoConstraints": planning.get("geo_constraints") or {},
             "exclusions": planning.get("exclusions") or [],
             "hypotheses": planning.get("hypotheses") or [],
             "availableProducts": self._product_labels(),
         }
 
-    def _lead_audit_item(self, comment: dict[str, Any], decision: dict[str, Any], final_decision: str, fallback_reason: str) -> dict[str, Any]:
+    def _lead_audit_item(
+        self,
+        comment: dict[str, Any],
+        decision: dict[str, Any],
+        final_decision: str,
+        fallback_reason: str,
+        lead: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         note = comment.get("note") or {}
         score = min(max(int(decision.get("score") or 0), 0), 100)
+        if lead:
+            score = min(max(int(lead.get("score") or score), 0), 100)
         return {
             "stage": "lead_signal",
-            "entity_type": "comment",
-            "entity_id": comment.get("comment_id") or decision.get("comment_id") or "",
+            "entity_type": "note" if comment.get("lead_type") == "note_author" else "comment",
+            "entity_id": comment.get("candidate_id") or comment.get("comment_id") or decision.get("comment_id") or "",
             "note_id": comment.get("note_id") or decision.get("note_id") or "",
             "source_keyword": note.get("source_keyword", ""),
             "decision": final_decision,
@@ -706,6 +944,8 @@ class HarnessPipeline:
             "risk": decision.get("risk") or "",
             "payload": {
                 "comment": {
+                    "candidate_id": comment.get("candidate_id"),
+                    "lead_type": comment.get("lead_type", "comment_lead"),
                     "comment_id": comment.get("comment_id"),
                     "note_id": comment.get("note_id"),
                     "content": comment.get("content", ""),
@@ -713,6 +953,10 @@ class HarnessPipeline:
                     "note": note,
                 },
                 "decision": decision,
+                "lead_type": (lead or {}).get("lead_type") or comment.get("lead_type", "comment_lead"),
+                "geo_status": (lead or {}).get("geo_status", ""),
+                "geo_reason": (lead or {}).get("geo_reason", ""),
+                "coverage_status": decision.get("coverage_status") or ("missing_after_retry" if final_decision == "missing_decision" else "initial"),
             },
         }
 
@@ -723,20 +967,131 @@ class HarnessPipeline:
             return fallback
         return str(value)
 
+    def _note_author_candidates(self, notes: list[dict[str, Any]], settings: dict[str, Any]) -> list[dict[str, Any]]:
+        candidates = []
+        for note in notes:
+            if not self._note_has_author_intent(note, settings):
+                continue
+            note_id = str(note.get("id") or "")
+            if not note_id:
+                continue
+            content = "；".join(
+                item for item in [
+                    str(note.get("title") or "").strip(),
+                    str(note.get("desc") or "").strip(),
+                ] if item
+            )
+            candidates.append({
+                "candidate_id": f"note:{note_id}",
+                "lead_type": "note_author",
+                "comment_id": "",
+                "note_id": note_id,
+                "nickname": note.get("author") or "",
+                "user_id": note.get("author_user_id") or "",
+                "content": content[:1200],
+                "ip": "",
+                "note": self._note_brief(note),
+            })
+        return candidates
+
+    def _note_has_author_intent(self, note: dict[str, Any], settings: dict[str, Any]) -> bool:
+        text = f"{note.get('title') or ''} {note.get('desc') or ''}".lower()
+        demand = str(settings.get("demandDescription") or "").lower()
+        commercial_terms = [
+            "预算", "报价", "费用", "多少钱", "成本", "降本", "私有化", "部署", "本地化",
+            "接入", "对接", "落地", "方案", "有人可以接", "求推荐", "想找", "采购",
+        ]
+        demand_terms = [term.lower() for term in ["客服", "ai", "大模型", "智能客服", "系统"] if term.lower() in demand]
+        has_business_intent = any(term in text for term in commercial_terms)
+        has_demand_overlap = not demand_terms or any(term in text for term in demand_terms)
+        return has_business_intent and has_demand_overlap
+
+    def _geo_constraints(self, demand_description: str, region: str = "") -> dict[str, Any]:
+        text = f"{demand_description} {region}"
+        city_to_province = {
+            "深圳": "广东",
+            "广州": "广东",
+            "东莞": "广东",
+            "佛山": "广东",
+            "上海": "上海",
+            "北京": "北京",
+            "杭州": "浙江",
+            "南京": "江苏",
+            "苏州": "江苏",
+            "成都": "四川",
+            "武汉": "湖北",
+        }
+        for city, province in city_to_province.items():
+            if city in text:
+                return {
+                    "target_city": city,
+                    "target_province": province,
+                    "strictness": "city_with_province_fallback",
+                    "fallback_policy": "same_province_keep_for_manual_confirmation",
+                }
+        if region:
+            return {"target_city": "", "target_province": region, "strictness": "province_or_region", "fallback_policy": "unknown_keep_with_risk"}
+        return {"target_city": "", "target_province": "", "strictness": "none", "fallback_policy": "keep"}
+
+    def _geo_status(self, ip: str, settings: dict[str, Any]) -> tuple[str, str]:
+        constraints = settings.get("geoConstraints") or {}
+        city = str(constraints.get("target_city") or "")
+        province = str(constraints.get("target_province") or "")
+        ip_text = str(ip or "").strip()
+        if not city and not province:
+            return "match", "本次需求没有明确地域硬约束。"
+        if not ip_text or ip_text in {"未知", "-"}:
+            return "unknown", "候选没有可用 IP 属地，需人工确认地域。"
+        if city and city in ip_text:
+            return "match", f"IP 属地包含目标城市 {city}。"
+        if province and province in ip_text:
+            if city:
+                return "needs_city_confirmation", f"IP 属地为 {province}，需人工确认是否在 {city}。"
+            return "match", f"IP 属地匹配目标地域 {province}。"
+        return "mismatch", f"IP 属地 {ip_text} 与目标地域 {city or province} 不匹配。"
+
+    def _apply_geo_gate(self, lead: dict[str, Any], settings: dict[str, Any]) -> None:
+        status, reason = self._geo_status(str(lead.get("ip") or ""), settings)
+        lead["geo_status"] = status
+        lead["geo_reason"] = reason
+        if status == "mismatch":
+            lead["score"] = min(int(lead.get("score") or 0), max(0, int(settings["minScore"]) - 1))
+            lead["priority"] = "D"
+            lead["risk"] = self._append_text(lead.get("risk"), reason)
+        elif status in {"needs_city_confirmation", "unknown"}:
+            lead["risk"] = self._append_text(lead.get("risk"), reason)
+
+    def _append_text(self, current: Any, addition: str) -> str:
+        current_text = str(current or "").strip()
+        addition = str(addition or "").strip()
+        if not addition:
+            return current_text
+        if not current_text:
+            return addition
+        if addition in current_text:
+            return current_text
+        return f"{current_text}；{addition}"
+
     def _lead_from_decision(self, comment: dict[str, Any], decision: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
         note = comment.get("note") or {}
         user_id = str(comment.get("user_id") or "")
         nickname = str(comment.get("nickname") or "")
-        lead_id = f"{comment.get('note_id')}:{comment.get('comment_id')}"
+        lead_type = str(comment.get("lead_type") or decision.get("lead_type") or "comment_lead")
+        if lead_type == "note_author":
+            lead_id = str(comment.get("candidate_id") or f"note:{comment.get('note_id')}")
+        else:
+            lead_id = f"{comment.get('note_id')}:{comment.get('comment_id')}"
         score = min(max(int(decision.get("score") or 0), 0), 100)
         priority = str(decision.get("priority") or _priority_from_score(score)).upper()[:1]
         evidence = self._text_value(decision.get("evidence"), comment.get("content", ""))
         return {
             "lead_id": lead_id,
+            "lead_type": "note_author" if lead_type == "note_author" else "comment_lead",
             "comment_id": comment.get("comment_id"),
             "user_id": redact_text(user_id, 4) if settings["redactUser"] else user_id,
             "nickname": redact_text(nickname, 1) if settings["redactUser"] else nickname,
             "raw_user_id": "" if settings["redactUser"] else user_id,
+            "raw_nickname": "" if settings["redactUser"] else nickname,
             "content": comment.get("content", ""),
             "evidence": evidence,
             "ip": comment.get("ip", ""),
@@ -752,6 +1107,8 @@ class HarnessPipeline:
             "note_id": comment.get("note_id"),
             "note_title": note.get("title", ""),
             "note_url": note.get("url", ""),
+            "geo_status": "",
+            "geo_reason": "",
             "feedback": "待人工判断",
             "outreach_copy": "",
             "source_comment": comment,
@@ -762,6 +1119,8 @@ class HarnessPipeline:
         content = str(comment.get("content") or "")
         comment_id = str(comment.get("id") or abs(hash(f"{note.get('id')}:{content}")))
         return {
+            "candidate_id": comment_id,
+            "lead_type": "comment_lead",
             "comment_id": comment_id,
             "note_id": note.get("id"),
             "nickname": user_info.get("nickname") or user_info.get("nick_name") or "",
@@ -786,6 +1145,7 @@ class HarnessPipeline:
             "engagement": note.get("engagement", 0),
             "url": note.get("url"),
             "source_keyword": note.get("source_keyword", ""),
+            "scanned_comments_count": note.get("scanned_comments_count", 0),
         }
 
     def _audit_from_trace(self, trace: list[dict[str, Any]]) -> list[dict[str, Any]]:

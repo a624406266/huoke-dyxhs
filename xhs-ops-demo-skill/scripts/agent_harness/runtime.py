@@ -42,6 +42,14 @@ class StructuredAgentRunner:
         try:
             messages = [
                 {"role": "system", "content": str(prompt.get("prompt") or spec.system_prompt)},
+                {
+                    "role": "system",
+                    "content": (
+                        "如果用户输入中包含 outputContract，必须优先满足其中的覆盖率、字段和枚举要求。"
+                        "当 outputContract 要求对每个输入实体返回判断时，不得只返回正例或高置信项；"
+                        "非商机、低分、低置信和丢弃项也必须逐条返回可审计 reason。"
+                    ),
+                },
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ]
             output, raw = self.llm_json_callable(

@@ -666,6 +666,16 @@
       });
     }
 
+    function geoStatusLabel(status) {
+      return {
+        match: '地域匹配',
+        possible: '地域可能匹配',
+        mismatch: '地域不匹配',
+        unknown: '地域未知',
+        needs_city_confirmation: '需确认城市'
+      }[status || ''] || '';
+    }
+
     function renderPlaceholderResults(
       title = '线索雷达待启动',
       detail = '填写需求描述后开始扫描，系统将输出可跟进线索、日报、来源笔记和执行日志。'
@@ -813,6 +823,8 @@
         const priority = l.priority || '-';
         const summary = l.demand_summary || l.evidence || '未提炼需求';
         const sourceTitle = (l.note_title || '来源笔记').slice(0, 28);
+        const leadTypeLabel = l.lead_type === 'note_author' ? '笔记作者' : '评论线索';
+        const geoLabel = geoStatusLabel(l.geo_status);
         return `
           <article class="lead-card">
             <div class="lead-card-head">
@@ -823,9 +835,11 @@
               <div class="lead-main">
                 <h3>${esc(summary)}</h3>
                 <div class="lead-meta">
+                  <span>${esc(leadTypeLabel)}</span>
                   <span>${esc(l.nickname || '未知用户')}</span>
                   <span>ID: ${esc(l.user_id || '-')}</span>
                   ${l.ip ? `<span>${esc(l.ip)}</span>` : ''}
+                  ${geoLabel ? `<span>${esc(geoLabel)}</span>` : ''}
                 </div>
               </div>
               <a class="lead-link" href="${esc(l.note_url)}" target="_blank" rel="noopener">${esc(sourceTitle)} ↗</a>
@@ -846,7 +860,7 @@
               </div>
               <div class="lead-block">
                 <b>风险提示</b>
-                <div class="small">${esc(l.risk || '跟进前需人工核验语境。')}</div>
+                <div class="small">${esc([l.risk, l.geo_reason].filter(Boolean).join('；') || '跟进前需人工核验语境。')}</div>
               </div>
             </div>
             <div class="lead-actions feedback-cell">
@@ -1090,6 +1104,8 @@
       const leads = cachedData.leads?.leads || [];
       const notes = cachedData.notes || [];
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(leads.map(l => ({
+        线索类型: l.lead_type === 'note_author' ? '笔记作者' : '评论线索',
+        地域状态: geoStatusLabel(l.geo_status), 地域说明: l.geo_reason,
         评分: l.score, 优先级: l.priority, 阶段: l.stage, 昵称: l.nickname, 用户ID: l.user_id,
         原文证据: l.evidence, 需求摘要: l.demand_summary, 推荐产品: l.recommended_products,
         跟进话术: l.outreach_copy, 风险提示: l.risk, 来源笔记: l.note_title, 来源链接: l.note_url, 反馈: l.feedback
@@ -1119,7 +1135,7 @@
         report.summary || '',
         '',
         '## Top 线索',
-        ...leads.slice(0, 10).map((l, i) => `${i + 1}. [${l.priority}/${l.score}] ${l.demand_summary}\\n   - 证据：${l.evidence}\\n   - 产品：${l.recommended_products}\\n   - 话术：${l.outreach_copy}\\n   - 来源：${l.note_url}`),
+        ...leads.slice(0, 10).map((l, i) => `${i + 1}. [${l.priority}/${l.score}] ${l.demand_summary}\\n   - 类型：${l.lead_type === 'note_author' ? '笔记作者' : '评论线索'}\\n   - 地域：${geoStatusLabel(l.geo_status) || '未标记'}${l.geo_reason ? `，${l.geo_reason}` : ''}\\n   - 证据：${l.evidence}\\n   - 产品：${l.recommended_products}\\n   - 话术：${l.outreach_copy}\\n   - 来源：${l.note_url}`),
         '',
         '## 风险提示',
         ...((report.risks || ['销售跟进前需人工核验语境。']).map(x => `- ${x}`))
