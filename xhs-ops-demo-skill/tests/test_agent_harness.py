@@ -672,8 +672,16 @@ class AgentHarnessTests(unittest.TestCase):
         self.assertGreaterEqual(len(storage.list_agent_runs(task_id)), 7)
         self.assertTrue(result["taskSummary"].get("task_summary"))
         self.assertTrue(result["evolutionSummary"])
-        audit = storage.list_audit_decisions(task_id, limit=100)
+        audit = storage.list_audit_decisions(task_id, limit=300)
         decisions = {(item["stage"], item["entityType"], item["entityId"], item["decision"]) for item in audit["items"]}
+        stages = {item["stage"] for item in audit["items"]}
+        for stage in {"orchestrate", "plan", "read_detail", "comments", "product_strategy", "qa", "report", "reflection"}:
+            self.assertIn(stage, stages)
+        self.assertIn(("orchestrate", "agent", "chief_orchestrator", "completed"), decisions)
+        self.assertIn(("plan", "agent", "planning_agent", "completed"), decisions)
+        self.assertIn(("qa", "agent", "critic_qa_agent", "approved"), decisions)
+        self.assertIn(("report", "agent", "report_agent", "generated"), decisions)
+        self.assertIn(("reflection", "agent", "reflection_evolution_agent", "completed"), decisions)
         self.assertIn(("search", "keyword", "腾讯云优惠", "planned"), decisions)
         self.assertIn(("relevance", "note", "n2", "drop"), decisions)
         self.assertIn(("lead_signal", "comment", "c2", "ignore"), decisions)
@@ -727,6 +735,9 @@ class AgentHarnessTests(unittest.TestCase):
         product_audits = [item for item in items if item["stage"] == "product_strategy" and item["entityType"] == "lead"]
         self.assertEqual({item["entityId"] for item in product_audits}, {"note:n-author", "n-comment:c-gd"})
         self.assertTrue(all(item["decision"] == "updated" for item in product_audits))
+        self.assertTrue([item for item in items if item["stage"] == "qa" and item["entityType"] == "agent" and item["decision"] == "approved"])
+        self.assertTrue([item for item in items if item["stage"] == "report" and item["entityType"] == "agent" and item["decision"] == "generated"])
+        self.assertTrue([item for item in items if item["stage"] == "reflection" and item["entityType"] == "agent" and item["decision"] == "completed"])
 
 
 if __name__ == "__main__":

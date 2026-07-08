@@ -62,6 +62,8 @@ LOCAL_GET_PATHS = {
 LOCAL_POST_PATHS = {
     "/api/search",
     "/api/leads",
+    "/api/leads/follow",
+    "/api/leads/dm-draft",
     "/api/tasks/start",
     "/api/tasks/status",
     "/api/tasks/list",
@@ -487,6 +489,133 @@ def default_expected_result(feedback_type: str) -> str:
     }.get(feedback_type, "请根据反馈改进对应 Agent 的判断。")
 
 
+def public_runtime_config() -> dict[str, Any]:
+    data = public_config()
+    xhs = CONFIG.get("xhs") or {}
+    data["xhs"] = {
+        "enable_follow_actions": bool(xhs.get("enable_follow_actions", False)),
+    }
+    return data
+
+
+def is_usable_xhs_user_id(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text or "*" in text or "…" in text:
+        return False
+    return len(text) >= 4
+
+
+def lead_target_user_id(lead: dict[str, Any], sales_user_id: int | None = None) -> str:
+    source_comment = lead.get("source_comment") or {}
+    candidates = [
+        lead.get("target_user_id"),
+        lead.get("raw_user_id"),
+        source_comment.get("user_id"),
+        lead.get("author_user_id"),
+    ]
+    comment_id = str(lead.get("comment_id") or "")
+    if comment_id:
+        comment = STORAGE.get_comment(comment_id, sales_user_id=sales_user_id)
+        if comment:
+            candidates.append(comment.get("userId") or comment.get("user_id"))
+    candidates.append(lead.get("user_id"))
+    for candidate in candidates:
+        if is_usable_xhs_user_id(candidate):
+            return str(candidate).strip()
+    return ""
+
+
+def audit_outreach(
+    lead: dict[str, Any],
+    decision: str,
+    reason: str,
+    *,
+    sales_user_id: int | None = None,
+    target_user_id: str = "",
+    result: dict[str, Any] | None = None,
+    error: str = "",
+    draft: str = "",
+) -> None:
+    task_id = int(lead.get("task_id") or 0)
+    if not task_id:
+        return
+    STORAGE.save_audit_decision(
+        task_id,
+        stage="outreach",
+        entity_type="lead",
+        entity_id=lead.get("lead_id"),
+        note_id=lead.get("note_id"),
+        source_keyword=(lead.get("source_comment") or {}).get("note", {}).get("source_keyword", ""),
+        decision=decision,
+        reason=reason,
+        score=lead.get("score"),
+        confidence=lead.get("confidence"),
+        priority=lead.get("priority"),
+        risk=error or lead.get("risk") or "",
+        payload={
+            "lead_id": lead.get("lead_id"),
+            "lead_type": lead.get("lead_type"),
+            "sales_user_id": int(sales_user_id or 0),
+            "target_user_id": target_user_id,
+            "nickname": lead.get("nickname") or lead.get("raw_nickname") or "",
+            "note_url": lead.get("note_url"),
+            "draft_preview": str(draft or "")[:200],
+            "result": result or {},
+        },
+    )
+
+
+def follow_lead(payload: dict[str, Any], sales_user_id: int | None) -> dict[str, Any]:
+    if not bool((CONFIG.get("xhs") or {}).get("enable_follow_actions", False)):
+        raise ValueError("手动关注功能未开启。请先在 Harness 系统设置中开启“允许手动关注线索对象”。")
+    lead_id = str(payload.get("leadId") or payload.get("lead_id") or "").strip()
+    if not lead_id:
+        raise ValueError("leadId 不能为空。")
+    lead = STORAGE.get_lead(lead_id, sales_user_id=sales_user_id)
+    if not lead:
+        raise ValueError("线索不存在或不属于当前销售账号。")
+    target_user_id = lead_target_user_id(lead, sales_user_id=sales_user_id)
+    if not target_user_id:
+        audit_outreach(lead, "follow_failed", "线索缺少可用的小红书用户 ID，无法关注。", sales_user_id=sales_user_id)
+        raise ValueError("该线索缺少可用的小红书用户 ID，无法关注。")
+    audit_outreach(lead, "follow_requested", "用户在工作台手动确认关注该线索对象。", sales_user_id=sales_user_id, target_user_id=target_user_id)
+    try:
+        adapter = get_adapter(sales_user_id)
+        adapter.ensure_authenticated()
+        result = adapter.follow_user(target_user_id)
+    except Exception as exc:
+        message = str(exc)
+        audit_outreach(lead, "follow_failed", "关注执行失败，需要人工处理登录态、验证码、账号权限或网络环境。", sales_user_id=sales_user_id, target_user_id=target_user_id, error=message)
+        raise RuntimeError(message) from exc
+    audit_outreach(lead, "follow_success", "已通过本地 xhs CLI 执行单条手动关注。", sales_user_id=sales_user_id, target_user_id=target_user_id, result=result)
+    return {
+        "ok": True,
+        "leadId": lead_id,
+        "userId": target_user_id,
+        "nickname": lead.get("nickname") or lead.get("raw_nickname") or "",
+        "xhs": result,
+    }
+
+
+def audit_dm_draft(payload: dict[str, Any], sales_user_id: int | None) -> dict[str, Any]:
+    lead_id = str(payload.get("leadId") or payload.get("lead_id") or "").strip()
+    if not lead_id:
+        raise ValueError("leadId 不能为空。")
+    lead = STORAGE.get_lead(lead_id, sales_user_id=sales_user_id)
+    if not lead:
+        raise ValueError("线索不存在或不属于当前销售账号。")
+    draft = str(payload.get("draft") or payload.get("text") or "").strip()
+    audit_outreach(
+        lead,
+        "dm_draft_copied",
+        "用户复制了私信草稿，系统未自动发送私信。",
+        sales_user_id=sales_user_id,
+        target_user_id=lead_target_user_id(lead, sales_user_id=sales_user_id),
+        draft=draft,
+    )
+    return {"ok": True, "leadId": lead_id, "decision": "dm_draft_copied"}
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(WEB_ROOT), **kwargs)
@@ -541,7 +670,7 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         if path == "/api/config":
-            self.respond_json({"ok": True, "data": public_config()})
+            self.respond_json({"ok": True, "data": public_runtime_config()})
             return
         if path == "/api/setup/status":
             self.respond_json({"ok": True, "data": {"hasAdmin": STORAGE.has_admin_user()}})
@@ -666,6 +795,10 @@ class Handler(SimpleHTTPRequestHandler):
             elif path == "/api/leads":
                 payload["scanLeads"] = True
                 result = task_manager.start_task(payload, mode="single", sales_user_id=sales_user_id)
+            elif path == "/api/leads/follow":
+                result = follow_lead(payload, sales_user_id)
+            elif path == "/api/leads/dm-draft":
+                result = audit_dm_draft(payload, sales_user_id)
             elif path == "/api/tasks/status":
                 result = task_manager.get_status(self.task_id_from_payload(payload), sales_user_id=sales_user_id)
             elif path == "/api/tasks/list":

@@ -200,6 +200,102 @@ class ServerAuthTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(body["data"]["status"], "cleared")
 
+    def test_follow_lead_is_disabled_by_default(self) -> None:
+        task_id = self.server.STORAGE.create_task({"keyword": "local"}, sales_user_id=0)
+        self.server.STORAGE.save_lead(task_id, {
+            "lead_id": "lead-disabled",
+            "note_id": "note-1",
+            "comment_id": "comment-1",
+            "score": 88,
+            "priority": "A",
+            "demand_summary": "询问报价",
+            "evidence": "怎么报价",
+            "outreach_copy": "你好，看到你在问报价。",
+            "raw_user_id": "target-user-1",
+            "nickname": "客户A",
+        })
+
+        with patch.object(self.server, "get_adapter", side_effect=AssertionError("follow should not run")):
+            status, body = self.request("POST", "/api/leads/follow", {"leadId": "lead-disabled"})
+        self.assertEqual(status, 400)
+        self.assertFalse(body["ok"])
+        self.assertIn("手动关注功能未开启", body["error"])
+
+    def test_follow_lead_executes_single_target_and_writes_audit(self) -> None:
+        self.server.CONFIG.setdefault("xhs", {})["enable_follow_actions"] = True
+        task_id = self.server.STORAGE.create_task({"keyword": "local"}, sales_user_id=0)
+        self.server.STORAGE.save_lead(task_id, {
+            "lead_id": "lead-follow",
+            "note_id": "note-1",
+            "comment_id": "comment-1",
+            "score": 92,
+            "priority": "A",
+            "demand_summary": "想了解私有化部署",
+            "evidence": "私有化怎么做",
+            "outreach_copy": "你好，看到你在问私有化部署。",
+            "raw_user_id": "target-user-2",
+            "nickname": "客户B",
+        })
+        calls = []
+
+        class FakeAdapter:
+            def ensure_authenticated(self) -> None:
+                calls.append(("ensure_authenticated", ""))
+
+            def follow_user(self, user_id: str) -> dict[str, Any]:
+                calls.append(("follow_user", user_id))
+                return {"ok": True, "data": {"target_user_id": user_id}}
+
+        with patch.object(self.server, "get_adapter", return_value=FakeAdapter()):
+            status, body = self.request("POST", "/api/leads/follow", {"leadId": "lead-follow"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["data"]["userId"], "target-user-2")
+        self.assertEqual(calls, [("ensure_authenticated", ""), ("follow_user", "target-user-2")])
+
+        audit = self.server.STORAGE.list_audit_decisions(task_id, stage="outreach", limit=10)
+        self.assertEqual([item["decision"] for item in audit["items"]], ["follow_requested", "follow_success"])
+
+    def test_follow_lead_is_scoped_to_local_sales_user(self) -> None:
+        self.server.CONFIG.setdefault("xhs", {})["enable_follow_actions"] = True
+        other_task = self.server.STORAGE.create_task({"keyword": "other"}, sales_user_id=123)
+        self.server.STORAGE.save_lead(other_task, {
+            "lead_id": "other-lead",
+            "note_id": "note-2",
+            "comment_id": "comment-2",
+            "score": 88,
+            "priority": "A",
+            "demand_summary": "跨账号线索",
+            "evidence": "跨账号",
+            "outreach_copy": "你好",
+            "raw_user_id": "target-other",
+        })
+
+        with patch.object(self.server, "get_adapter", side_effect=AssertionError("cross-tenant follow should not run")):
+            status, body = self.request("POST", "/api/leads/follow", {"leadId": "other-lead"})
+        self.assertEqual(status, 400)
+        self.assertFalse(body["ok"])
+        self.assertIn("线索不存在或不属于当前销售账号", body["error"])
+
+    def test_dm_draft_copy_writes_outreach_audit_without_sending_message(self) -> None:
+        task_id = self.server.STORAGE.create_task({"keyword": "local"}, sales_user_id=0)
+        self.server.STORAGE.save_lead(task_id, {
+            "lead_id": "lead-draft",
+            "note_id": "note-3",
+            "comment_id": "comment-3",
+            "score": 75,
+            "priority": "B",
+            "demand_summary": "想看方案",
+            "evidence": "有方案吗",
+            "outreach_copy": "你好，看到你在问方案。",
+            "raw_user_id": "target-user-3",
+        })
+
+        status, body = self.request("POST", "/api/leads/dm-draft", {"leadId": "lead-draft", "draft": "你好"})
+        self.assertEqual(status, 200, body)
+        audit = self.server.STORAGE.list_audit_decisions(task_id, stage="outreach", decision="dm_draft_copied", limit=10)
+        self.assertEqual(audit["total"], 1)
+        self.assertIn("未自动发送私信", audit["items"][0]["reason"])
+
     def test_harness_routes_require_admin_session(self) -> None:
         status, body = self.request("GET", "/api/agents")
         self.assertEqual(status, 401)

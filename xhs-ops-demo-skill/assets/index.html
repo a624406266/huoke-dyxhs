@@ -161,6 +161,26 @@
     .lead-block { border: 1px solid var(--line); border-radius: 8px; background: var(--primary-soft); padding: 12px; }
     .lead-block b { display: block; margin-bottom: 6px; font-size: 12px; color: #374151; }
     .lead-actions { border-top: 1px solid var(--line); padding-top: 12px; }
+    .touch-actions {
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .touch-actions button {
+      width: auto;
+      height: 36px;
+      margin: 0;
+      padding: 0 13px;
+      font-size: 13px;
+      border-radius: 8px;
+    }
+    .btn-follow { background: var(--primary); }
+    .btn-draft { color: var(--text); background: #ffffff; border: 1px solid var(--line-strong); }
+    .btn-draft:hover:not(:disabled) { color: var(--text); background: #f7f9fb; }
+    .outreach-status { flex: 1 1 260px; }
     .modal-mask {
       position: fixed; inset: 0; background: rgba(15,23,42,.42); display: none; align-items: center; justify-content: center;
       z-index: 50; padding: 18px;
@@ -378,7 +398,7 @@
         </span>
       </div>
     </div>
-    <div class="sub">面向不同团队和行业，只读分析小红书公开笔记与评论。总控 Agent 先理解需求描述，再规划关键词、筛选帖子、识别可人工跟进线索。系统只给线索和建议，不自动触达。</div>
+    <div class="sub">面向不同团队和行业，采集分析小红书公开笔记与评论。总控 Agent 先理解需求描述，再规划关键词、筛选帖子、识别可人工跟进线索。系统不会自动触达；关注需逐条手动确认，私信仅提供草稿辅助。</div>
   </header>
 
   <div id="xhsLoginModal" class="modal-mask">
@@ -403,6 +423,27 @@
       </div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="closeXhsLogin()">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="dmDraftModal" class="modal-mask">
+    <div class="modal">
+      <div class="modal-head">
+        <h2>私信草稿</h2>
+        <button class="icon-btn" style="box-shadow:none;width:34px;height:34px;font-size:16px;" onclick="closeDmDraft()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="dmDraftMeta" class="small">请选择一条线索。</div>
+        <label for="dmDraftText">草稿内容</label>
+        <textarea id="dmDraftText" style="min-height:130px;"></textarea>
+        <div class="field-help">这里只生成和复制草稿，不会自动发送私信。请打开对象主页后，由账号使用者在小红书页面中人工确认发送。</div>
+        <div id="dmDraftStatus" class="field-help"></div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" onclick="closeDmDraft()">关闭</button>
+        <button type="button" class="btn-secondary" onclick="openLeadProfileFromDraft()">打开对象主页</button>
+        <button type="button" onclick="copyDmDraft()">复制话术</button>
       </div>
     </div>
   </div>
@@ -509,7 +550,7 @@
       </div>
 
       <div class="hint">
-        <b>合规边界：</b>本工具仅执行 status/search/read/comments，只读分析公开内容。遇到验证码、风控、登录过期会停止任务；跟进动作必须由账号使用者人工确认。
+        <b>合规边界：</b>采集分析阶段仅执行 status/search/read/comments。遇到验证码、风控、登录过期会停止任务；关注仅在开启设置后逐条手动确认，私信只提供草稿复制，不自动发送。
       </div>
     </section>
 
@@ -562,6 +603,8 @@
     let xhsLoginPollTimer = null;
     let currentTaskId = localStorage.getItem('currentTaskId') || '';
     let lastTaskEvents = [];
+    let workbenchConfig = { xhs: { enable_follow_actions: false } };
+    let currentDraftLeadIndex = null;
     const FEEDBACK_LABELS = {
       valid_lead: '有效线索',
       invalid_lead: '误判线索',
@@ -674,6 +717,164 @@
         unknown: '地域未知',
         needs_city_confirmation: '需确认城市'
       }[status || ''] || '';
+    }
+
+    function cleanUserId(value) {
+      const text = String(value || '').trim();
+      if (!text || text.includes('*') || text.includes('…')) return '';
+      return text.length >= 4 ? text : '';
+    }
+
+    function leadTargetUserId(lead) {
+      return cleanUserId(
+        lead?.raw_user_id ||
+        lead?.target_user_id ||
+        lead?.source_comment?.user_id ||
+        lead?.author_user_id ||
+        lead?.user_id
+      );
+    }
+
+    function hasFollowTarget(lead) {
+      return Boolean(leadTargetUserId(lead) || lead?.comment_id);
+    }
+
+    function leadProfileUrl(lead) {
+      const userId = leadTargetUserId(lead);
+      if (userId) return `https://www.xiaohongshu.com/user/profile/${encodeURIComponent(userId)}`;
+      return lead?.note_url || '';
+    }
+
+    function outreachDraft(lead) {
+      return String(
+        lead?.outreach_copy ||
+        lead?.first_message ||
+        (lead?.demand_summary ? `你好，看到你提到“${lead.demand_summary}”，想和你交流一下具体需求。` : '')
+      ).trim();
+    }
+
+    async function postJson(path, body) {
+      const res = await fetch(`${apiBase()}${path}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {})
+      });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error || '请求失败');
+      return json.data;
+    }
+
+    async function getCurrentXhsUserText() {
+      try {
+        const data = await postJson('/api/xhs_login/status', {});
+        const user = data?.xhs?.data?.user || {};
+        if (data?.xhs?.data?.authenticated) {
+          const name = user.nickname || user.nick_name || user.name || '已登录账号';
+          const id = user.user_id || user.id || '';
+          return `${name}${id ? `（${id}）` : ''}`;
+        }
+        return data?.xhsError ? `未确认：${data.xhsError}` : '未确认登录态';
+      } catch (err) {
+        return `未确认：${err.message || err}`;
+      }
+    }
+
+    async function confirmFollowLead(index) {
+      const lead = cachedData?.leads?.leads?.[index];
+      if (!lead) return alert('找不到该线索数据');
+      if (!workbenchConfig?.xhs?.enable_follow_actions) {
+        return alert('手动关注功能未开启。请先在 Harness 控制台的系统设置中开启“允许手动关注线索对象”。');
+      }
+      if (!hasFollowTarget(lead)) return alert('该线索没有可用的小红书用户 ID，无法关注。');
+      const accountText = await getCurrentXhsUserText();
+      const visibleUserId = lead.user_id || leadTargetUserId(lead) || '-';
+      const ok = confirm(
+        [
+          '即将执行一次小红书关注动作，请确认：',
+          '',
+          `当前登录账号：${accountText}`,
+          `目标对象：${lead.nickname || '未知用户'}（${visibleUserId}）`,
+          `来源线索：${lead.demand_summary || lead.evidence || lead.lead_id || '-'}`,
+          '',
+          '该动作只会关注这一条线索对象，不会批量关注，也不会发送私信。'
+        ].join('\n')
+      );
+      if (!ok) return;
+      const statusEl = $(`outreachStatus-${index}`);
+      if (statusEl) {
+        statusEl.textContent = '正在执行关注...';
+        statusEl.style.color = 'var(--muted)';
+      }
+      try {
+        const data = await postJson('/api/leads/follow', { leadId: lead.lead_id });
+        lead.follow_status = 'follow_success';
+        if (statusEl) {
+          statusEl.textContent = `已关注：${data.nickname || lead.nickname || data.userId || '目标用户'}`;
+          statusEl.style.color = 'var(--green)';
+        }
+        setStatus('已完成单条手动关注，可在 Harness 审计日志中查看 outreach 记录。', '✅');
+      } catch (err) {
+        if (statusEl) {
+          statusEl.textContent = `关注失败：${err.message || err}`;
+          statusEl.style.color = 'var(--red)';
+        }
+        alert('关注失败：' + (err.message || err));
+      }
+    }
+
+    function openDmDraft(index) {
+      const lead = cachedData?.leads?.leads?.[index];
+      if (!lead) return alert('找不到该线索数据');
+      currentDraftLeadIndex = index;
+      $('dmDraftText').value = outreachDraft(lead);
+      $('dmDraftMeta').textContent = `${lead.nickname || '未知用户'} · ${lead.user_id || leadTargetUserId(lead) || '无用户 ID'} · ${lead.demand_summary || lead.evidence || ''}`;
+      $('dmDraftStatus').textContent = '草稿可编辑。复制后请在小红书页面中人工确认发送。';
+      $('dmDraftStatus').style.color = 'var(--muted)';
+      $('dmDraftModal').style.display = 'flex';
+    }
+
+    function closeDmDraft() {
+      $('dmDraftModal').style.display = 'none';
+      currentDraftLeadIndex = null;
+    }
+
+    function openLeadProfileFromDraft() {
+      const lead = cachedData?.leads?.leads?.[currentDraftLeadIndex];
+      const url = leadProfileUrl(lead);
+      if (!url) return alert('该线索没有可打开的对象主页或来源链接。');
+      window.open(url, '_blank', 'noopener');
+    }
+
+    async function copyDmDraft() {
+      const lead = cachedData?.leads?.leads?.[currentDraftLeadIndex];
+      if (!lead) return alert('找不到该线索数据');
+      const text = $('dmDraftText').value.trim();
+      if (!text) return alert('草稿内容不能为空。');
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          $('dmDraftText').focus();
+          $('dmDraftText').select();
+          document.execCommand('copy');
+        }
+        $('dmDraftStatus').textContent = '已复制草稿。系统不会自动发送私信，请在小红书页面中人工确认。';
+        $('dmDraftStatus').style.color = 'var(--green)';
+        const statusEl = $(`outreachStatus-${currentDraftLeadIndex}`);
+        if (statusEl) {
+          statusEl.textContent = '已复制私信草稿';
+          statusEl.style.color = 'var(--green)';
+        }
+        try {
+          await postJson('/api/leads/dm-draft', { leadId: lead.lead_id, draft: text });
+        } catch (auditErr) {
+          console.warn('私信草稿审计失败', auditErr);
+        }
+      } catch (err) {
+        $('dmDraftStatus').textContent = `复制失败：${err.message || err}`;
+        $('dmDraftStatus').style.color = 'var(--red)';
+      }
     }
 
     function renderPlaceholderResults(
@@ -825,6 +1026,10 @@
         const sourceTitle = (l.note_title || '来源笔记').slice(0, 28);
         const leadTypeLabel = l.lead_type === 'note_author' ? '笔记作者' : '评论线索';
         const geoLabel = geoStatusLabel(l.geo_status);
+        const followEnabled = Boolean(workbenchConfig?.xhs?.enable_follow_actions);
+        const followTargetAvailable = hasFollowTarget(l);
+        const followLabel = followEnabled ? (followTargetAvailable ? '关注' : '无用户ID') : '关注未开启';
+        const followDisabled = !followEnabled || !followTargetAvailable ? 'disabled' : '';
         return `
           <article class="lead-card">
             <div class="lead-card-head">
@@ -862,6 +1067,11 @@
                 <b>风险提示</b>
                 <div class="small">${esc([l.risk, l.geo_reason].filter(Boolean).join('；') || '跟进前需人工核验语境。')}</div>
               </div>
+            </div>
+            <div class="touch-actions">
+              <button type="button" class="btn-follow" ${followDisabled} onclick="confirmFollowLead(${idx})">${esc(followLabel)}</button>
+              <button type="button" class="btn-draft" onclick="openDmDraft(${idx})">私信草稿</button>
+              <div id="outreachStatus-${idx}" class="small outreach-status">${esc(followEnabled ? '触达动作需逐条人工确认；私信只生成草稿。' : '关注功能默认关闭；私信只生成草稿。')}</div>
             </div>
             <div class="lead-actions feedback-cell">
               <select id="feedbackType-${idx}">
@@ -1153,6 +1363,7 @@
         const res = await fetch(`${apiBase()}/api/config`);
         const json = await res.json();
         if (!json.ok) return;
+        workbenchConfig = json.data || workbenchConfig;
         const firstDirection = json.data?.businessDirections?.[0]?.value;
         if (firstDirection && !$('businessDirection').value) $('businessDirection').value = firstDirection;
       } catch {}

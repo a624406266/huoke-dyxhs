@@ -128,7 +128,9 @@ Skill 包含 `SKILL.md`、`agents/openai.yaml`、WorkBuddy `_user_meta.json`、�
 
 ## 合规边界
 
-- 只读操作：`xhs status` / `xhs search` / `xhs read` / `xhs comments`
+- 采集分析只读：`xhs status` / `xhs search` / `xhs read` / `xhs comments`
+- 可选手动关注：开启 Harness 设置后，用户可在单条线索上二次确认执行 `xhs follow <user_id>`；不支持批量关注
+- 私信只提供草稿复制和打开对象主页，不自动发送
 - 不自动评论、私信、关注、点赞、收藏、发布
 - 遇到验证码、风控、登录过期时停止任务并提示人工处理
 - 导出的线索仅限使用者人工核验与跟进使用

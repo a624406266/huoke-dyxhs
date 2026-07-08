@@ -294,7 +294,7 @@ class LeadPipeline:
             "auditTrail": audit_trail,
             "safety": {
                 "mode": "read-only",
-                "actions": "status/search/read/comments only; no like/favorite/comment/follow/post/private message",
+                "actions": "task collection uses status/search/read/comments only; no automatic like/favorite/comment/follow/post/private message. Follow is only allowed from the UI after per-lead user confirmation; private messages are draft-only and never auto-sent.",
                 "xhsCommand": " ".join(self.adapter.command),
                 "delayMin": delay_min,
                 "delayMax": delay_max,

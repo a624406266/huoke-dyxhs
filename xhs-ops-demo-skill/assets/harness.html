@@ -39,11 +39,12 @@
     }
     button:hover, .button-link:hover { border-color: var(--line-strong); background: #f8f8f7; }
     button:disabled { opacity: .55; cursor: not-allowed; }
-    input {
+    input, select {
       width: 100%; height: 40px; border: 1px solid var(--line-strong); border-radius: 8px; padding: 0 11px;
       font-size: 14px; color: var(--text); background: var(--surface);
     }
-    input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px rgba(17, 17, 17, .08); }
+    select { cursor: pointer; }
+    input:focus, select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px rgba(17, 17, 17, .08); }
     button.primary { border-color: var(--primary); color: white; background: var(--primary); }
     button.primary:hover { background: var(--primary-hover); }
     button.danger { border: 0; color: white; background: var(--red); }
@@ -140,6 +141,10 @@
     }
     .feedback-output { max-height: 160px; }
     .audit-output { max-height: 190px; }
+    .audit-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .audit-evidence { margin-top: 8px; color: #383838; }
+    .audit-raw { margin-top: 10px; }
+    .audit-raw summary { cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 760; }
     .feedback-action {
       display: none; align-items: center; gap: 8px; margin-top: 10px; padding: 9px 10px;
       border-radius: 8px; background: var(--surface-soft); color: #333; font-size: 12px; font-weight: 760;
@@ -232,12 +237,12 @@
     }
     button.secondary:hover:not(:disabled) { background: #f7f9fb; }
     button.danger { background: var(--red); }
-    input {
+    input, select {
       background: #fcfdfd;
       transition: border-color .14s ease, box-shadow .14s ease, background .14s ease;
     }
-    input:hover { border-color: #aeb8c4; background: #ffffff; }
-    input:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
+    input:hover, select:hover { border-color: #aeb8c4; background: #ffffff; }
+    input:focus, select:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
     input[type="checkbox"] { accent-color: var(--accent); }
     .card, .section, .gate-card {
       border-color: #d9e0e7;
@@ -445,31 +450,81 @@
           </h2>
           <div class="filter-grid">
             <div>
-              <label for="auditTaskId">Task ID</label>
+              <label for="auditTaskId">任务 ID</label>
               <input id="auditTaskId" inputmode="numeric" placeholder="全部" />
             </div>
             <div>
-              <label for="auditStage">Stage</label>
-              <input id="auditStage" placeholder="全部" />
+              <label for="auditStage">阶段</label>
+              <select id="auditStage">
+                <option value="">全部</option>
+                <option value="search">搜索采集</option>
+                <option value="relevance">相关性判断</option>
+                <option value="lead_signal">线索识别</option>
+                <option value="product_strategy">产品策略</option>
+                <option value="orchestrate">任务编排</option>
+                <option value="plan">搜索规划</option>
+                <option value="read_detail">详情读取</option>
+                <option value="comments">评论扫描</option>
+                <option value="qa">质检风控</option>
+                <option value="report">报告生成</option>
+                <option value="reflection">复盘进化</option>
+                <option value="outreach">触达动作</option>
+              </select>
             </div>
             <div>
-              <label for="auditEntityType">Entity Type</label>
-              <input id="auditEntityType" placeholder="全部" />
+              <label for="auditEntityType">对象类型</label>
+              <select id="auditEntityType">
+                <option value="">全部</option>
+                <option value="keyword">关键词</option>
+                <option value="note">笔记</option>
+                <option value="comment">评论</option>
+                <option value="lead">线索</option>
+                <option value="task">任务</option>
+                <option value="agent">Agent</option>
+              </select>
             </div>
             <div>
-              <label for="auditDecision">Decision</label>
-              <input id="auditDecision" placeholder="全部" />
+              <label for="auditDecision">决策</label>
+              <select id="auditDecision">
+                <option value="">全部</option>
+                <option value="planned">已规划</option>
+                <option value="collected">已采集</option>
+                <option value="parse_failed">解析失败</option>
+                <option value="dropped_duplicate">重复丢弃</option>
+                <option value="dropped_time_filter">时间过滤丢弃</option>
+                <option value="keep">保留</option>
+                <option value="drop">丢弃</option>
+                <option value="missing_decision">缺失判断</option>
+                <option value="lead">商机线索</option>
+                <option value="ignore">非商机</option>
+                <option value="below_threshold">低于阈值</option>
+                <option value="updated">已更新</option>
+                <option value="completed">已完成</option>
+                <option value="skipped">已跳过</option>
+                <option value="approved">质检通过</option>
+                <option value="needs_review">需要复核</option>
+                <option value="warning">风险警告</option>
+                <option value="generated">已生成</option>
+                <option value="recommended_action">推荐动作</option>
+                <option value="risk_warning">风险提示</option>
+                <option value="review">复盘评估</option>
+                <option value="prompt_candidate">Prompt 候选</option>
+                <option value="follow_requested">关注已请求</option>
+                <option value="follow_success">关注成功</option>
+                <option value="follow_failed">关注失败</option>
+                <option value="dm_draft_copied">私信草稿已复制</option>
+              </select>
             </div>
             <div>
-              <label for="auditKeyword">Keyword</label>
+              <label for="auditKeyword">关键词</label>
               <input id="auditKeyword" placeholder="全部" />
             </div>
             <div>
-              <label for="auditOffset">Offset</label>
+              <label for="auditOffset">起始位置</label>
               <input id="auditOffset" type="number" min="0" value="0" />
             </div>
             <div>
-              <label for="auditLimit">Limit</label>
+              <label for="auditLimit">每页数量</label>
               <input id="auditLimit" type="number" min="1" max="100" value="100" />
             </div>
           </div>
@@ -550,6 +605,9 @@
           <label for="settingMaxComments">每篇最多扫描评论数</label>
           <input id="settingMaxComments" type="number" min="1" max="500" value="50" />
           <div class="field-help">默认 50。数值越高召回越多，但任务会更慢，也更容易遇到验证码或风控。</div>
+
+          <label class="checks"><input id="settingEnableFollowActions" type="checkbox" />允许手动关注线索对象</label>
+          <div class="field-help">默认关闭。开启后，销售页每条线索会显示“关注”按钮；仍需用户逐条二次确认，不支持批量关注，也不会自动私信。</div>
         </div>
       </section>
     </section>
@@ -620,6 +678,7 @@
       critic_qa_agent: '质检风控 Agent',
       report_agent: '报告 Agent',
       reflection_evolution_agent: '复盘进化 Agent',
+      feedback_learning_agent: '反馈学习 Agent',
       'Chief Orchestrator': '总控编排 Agent',
       'Planning Agent': '搜索规划 Agent',
       'Relevance Agent': '相关性判断 Agent',
@@ -631,6 +690,7 @@
       'Auth Agent': '登录检查',
       'Tool Harness': '工具 Harness',
       'Delay Guard': '延迟保护',
+      'Task Manager': '任务管理器',
       'Keyword Agent': '关键词规划 Agent',
       'Search Agent': '搜索读取 Agent',
       'Signal Agent': '线索信号 Agent',
@@ -648,6 +708,88 @@
       'quality and safety review': '质量与安全边界检查',
       'sales report generation': '获客报告生成',
       'task reflection and evolution': '任务复盘与进化候选生成',
+      'feedback learning analysis': '人工反馈学习分析',
+      'missing relevance decisions': '相关性缺失判断补齐',
+      'missing lead decisions': '线索缺失判断补齐',
+      'missing product updates': '产品策略缺失补齐',
+    };
+    const STAGE_DISPLAY_NAMES = {
+      search: '搜索采集',
+      relevance: '相关性判断',
+      lead_signal: '线索识别',
+      product_strategy: '产品策略',
+      orchestrate: '任务编排',
+      plan: '搜索规划',
+      read_detail: '详情读取',
+      comments: '评论扫描',
+      qa: '质检风控',
+      report: '报告生成',
+      reflection: '复盘进化',
+      outreach: '触达动作',
+      done: '已完成',
+      starting: '启动中',
+      round: '扫描轮次',
+    };
+    const DECISION_DISPLAY_NAMES = {
+      planned: '已规划',
+      collected: '已采集',
+      parse_failed: '解析失败',
+      dropped_duplicate: '重复丢弃',
+      dropped_time_filter: '时间过滤丢弃',
+      keep: '保留',
+      drop: '丢弃',
+      missing_decision: '缺失判断',
+      lead: '商机线索',
+      ignore: '非商机',
+      below_threshold: '低于阈值',
+      updated: '已更新',
+      skipped: '已跳过',
+      approved: '质检通过',
+      needs_review: '需要复核',
+      warning: '风险警告',
+      generated: '已生成',
+      recommended_action: '推荐动作',
+      risk_warning: '风险提示',
+      review: '复盘评估',
+      prompt_candidate: 'Prompt 候选',
+      follow_requested: '关注已请求',
+      follow_success: '关注成功',
+      follow_failed: '关注失败',
+      dm_draft_copied: '私信草稿已复制',
+      allow: '通过',
+      pass: '通过',
+      reject: '拒绝',
+      block: '阻止',
+      running: '运行中',
+      completed: '已完成',
+      failed: '失败',
+      stopped: '已停止',
+      interrupted: '已中断',
+    };
+    const ENTITY_TYPE_DISPLAY_NAMES = {
+      keyword: '关键词',
+      note: '笔记',
+      comment: '评论',
+      lead: '线索',
+      task: '任务',
+      agent: 'Agent',
+      eval_case: '评估样例',
+    };
+    const COVERAGE_STATUS_DISPLAY_NAMES = {
+      initial: '首轮返回',
+      retry: '补齐返回',
+      missing_after_retry: '补齐后仍缺失',
+    };
+    const LEAD_TYPE_DISPLAY_NAMES = {
+      comment_lead: '评论线索',
+      note_author: '笔记作者',
+    };
+    const GEO_STATUS_DISPLAY_NAMES = {
+      match: '地域匹配',
+      possible: '可能匹配',
+      mismatch: '地域不匹配',
+      unknown: '地域未知',
+      needs_city_confirmation: '需确认城市',
     };
     const FEEDBACK_LABELS = {
       valid_lead: '有效线索',
@@ -842,12 +984,42 @@
       return { pending:'待分析', analyzed:'已分析', applied:'已应用', dismissed:'已忽略' }[status] || status || '未知';
     }
 
+    function mappedLabel(map, value, fallback = '-') {
+      if (value === undefined || value === null || value === '') return fallback;
+      const text = String(value);
+      return map[text] || map[text.toLowerCase()] || text;
+    }
+
     function agentLabel(value) {
-      return AGENT_DISPLAY_NAMES[value] || value || 'Agent';
+      return mappedLabel(AGENT_DISPLAY_NAMES, value, 'Agent');
     }
 
     function purposeLabel(value) {
-      return PURPOSE_DISPLAY_NAMES[value] || value || '';
+      return mappedLabel(PURPOSE_DISPLAY_NAMES, value, '');
+    }
+
+    function stageLabel(value) {
+      return mappedLabel(STAGE_DISPLAY_NAMES, value);
+    }
+
+    function decisionLabel(value) {
+      return mappedLabel(DECISION_DISPLAY_NAMES, value);
+    }
+
+    function entityTypeLabel(value) {
+      return mappedLabel(ENTITY_TYPE_DISPLAY_NAMES, value);
+    }
+
+    function coverageStatusLabel(value) {
+      return mappedLabel(COVERAGE_STATUS_DISPLAY_NAMES, value, '');
+    }
+
+    function leadTypeLabel(value) {
+      return mappedLabel(LEAD_TYPE_DISPLAY_NAMES, value, '');
+    }
+
+    function geoStatusLabel(value) {
+      return mappedLabel(GEO_STATUS_DISPLAY_NAMES, value, '');
     }
 
     function disableLabel(status) {
@@ -859,6 +1031,38 @@
     function textBlock(value, limit = 900) {
       const text = typeof value === 'string' ? value : JSON.stringify(value || {}, null, 2);
       return esc(text.slice(0, limit));
+    }
+
+    function readableText(value, limit = 600) {
+      if (value === undefined || value === null || value === '') return '';
+      if (Array.isArray(value)) {
+        return value.map(item => typeof item === 'string' ? item : JSON.stringify(item, null, 2)).join('；').slice(0, limit);
+      }
+      if (typeof value === 'object') return JSON.stringify(value, null, 2).slice(0, limit);
+      return String(value).slice(0, limit);
+    }
+
+    function auditMetaHtml(item) {
+      const payload = item && typeof item.payload === 'object' && !Array.isArray(item.payload) ? item.payload : {};
+      const decision = payload.decision && typeof payload.decision === 'object' ? payload.decision : {};
+      const comment = payload.comment && typeof payload.comment === 'object' ? payload.comment : {};
+      const update = payload.update && typeof payload.update === 'object' ? payload.update : {};
+      const meta = [];
+      const leadType = payload.lead_type || comment.lead_type || decision.lead_type;
+      const geoStatus = payload.geo_status || decision.geo_status || update.geo_status;
+      const coverageStatus = payload.coverage_status || decision.coverage_status || update.coverage_status;
+      if (leadType) meta.push(['线索类型', leadTypeLabel(leadType), leadType]);
+      if (geoStatus) meta.push(['地域状态', geoStatusLabel(geoStatus), geoStatus]);
+      if (coverageStatus) meta.push(['覆盖状态', coverageStatusLabel(coverageStatus), coverageStatus]);
+      if (item.score !== undefined && item.score !== null && item.score !== '') meta.push(['评分', String(item.score), 'score']);
+      if (item.confidence !== undefined && item.confidence !== null && item.confidence !== '') {
+        const confidence = Number(item.confidence || 0);
+        meta.push(['置信度', `${Math.round(confidence <= 1 ? confidence * 100 : confidence)}%`, 'confidence']);
+      }
+      if (item.priority) meta.push(['优先级', item.priority, item.priority]);
+      return meta.length
+        ? `<div class="audit-meta">${meta.map(([name, label, raw]) => `<span class="pill ${safeClass(raw)}">${esc(name)}：${esc(label)}</span>`).join('')}</div>`
+        : '';
     }
 
     async function post(path, body = {}) {
@@ -994,8 +1198,11 @@
       $('auditPrev').disabled = offset <= 0;
       $('auditNext').disabled = !auditState.hasMore;
       if (!items.length) {
+        const selectedStage = $('auditStage')?.value || '';
         $('auditStatus').textContent = total ? `共 ${fmt(total)} 条，当前页为空。` : '未找到匹配审计日志。';
-        $('auditLogs').innerHTML = '<div class="small">暂无审计日志</div>';
+        $('auditLogs').innerHTML = selectedStage
+          ? `<div class="small">该阶段当前没有审计记录。Agent 是否执行请查看“Agent轨迹”。</div>`
+          : '<div class="small">暂无审计日志</div>';
         return;
       }
       const end = offset + items.length;
@@ -1008,21 +1215,31 @@
         const entityType = item.entityType ?? item.entity_type ?? item.type ?? '-';
         const entityId = item.entityId ?? item.entity_id ?? item.noteId ?? item.note_id ?? item.commentId ?? item.comment_id ?? item.leadId ?? item.lead_id ?? '-';
         const decision = item.decision ?? item.action ?? item.result ?? item.status ?? '-';
-        const agent = agentLabel(item.agentKey ?? item.agent_key ?? item.agentName ?? item.agent_name ?? item.agent);
-        const message = item.message ?? item.reason ?? item.summary ?? item.decisionSummary ?? item.evidence ?? '';
+        const agentRaw = item.agentKey ?? item.agent_key ?? item.agentName ?? item.agent_name ?? item.agent;
+        const agent = agentRaw ? agentLabel(agentRaw) : '审计记录';
+        const message = readableText(item.message ?? item.reason ?? item.summary ?? item.decisionSummary ?? '');
+        const evidence = readableText(item.evidence ?? item.evidence_json ?? item.evidenceJson ?? '');
+        const risk = readableText(item.risk ?? '');
         const keyword = item.sourceKeyword ?? item.source_keyword ?? item.keyword ?? item.query ?? '';
         const createdAt = item.createdAt ?? item.created_at ?? item.time ?? item.timestamp;
+        const meta = auditMetaHtml(item);
         return `
           <div class="item">
             <div class="item-head">
               <div>
                 <b>${esc(agent)} <span class="mono">#${esc(taskId)}</span></b>
-                <div class="small">${esc(stage)} · ${esc(entityType)}:${esc(entityId)}${keyword ? ` · ${esc(keyword)}` : ''} · ${formatAnyTime(createdAt)}</div>
+                <div class="small">${esc(stageLabel(stage))} · ${esc(entityTypeLabel(entityType))}:${esc(entityId)}${keyword ? ` · 关键词：${esc(keyword)}` : ''} · ${formatAnyTime(createdAt)}</div>
               </div>
-              <span class="pill ${safeClass(decision)}">${esc(decision)}</span>
+              <span class="pill ${safeClass(decision)}">${esc(decisionLabel(decision))}</span>
             </div>
-            ${message ? `<div class="small">${esc(message)}</div>` : ''}
-            <div class="audit-output">${textBlock(item, 1800)}</div>
+            ${message ? `<div class="small">原因：${esc(message)}</div>` : ''}
+            ${evidence ? `<div class="small audit-evidence">证据：${esc(evidence)}</div>` : ''}
+            ${risk ? `<div class="small audit-evidence">风险：${esc(risk)}</div>` : ''}
+            ${meta}
+            <details class="audit-raw">
+              <summary>原始数据</summary>
+              <div class="audit-output">${textBlock(item, 1800)}</div>
+            </details>
           </div>
         `;
       }).join('');
@@ -1294,6 +1511,7 @@
         $('settingDelayMin').value = s.xhs?.read_delay_min ?? 7;
         $('settingDelayMax').value = s.xhs?.read_delay_max ?? 60;
         $('settingMaxComments').value = s.xhs?.max_comments_per_note ?? 50;
+        $('settingEnableFollowActions').checked = Boolean(s.xhs?.enable_follow_actions);
         $('settingRedactUser').checked = Boolean(s.sales?.redact_user);
         settingsLoaded = true;
       } catch (err) {
@@ -1322,7 +1540,8 @@
             bin: $('settingXhsBin').value.trim(),
             read_delay_min: Number($('settingDelayMin').value || 7),
             read_delay_max: Number($('settingDelayMax').value || 60),
-            max_comments_per_note: Number($('settingMaxComments').value || 50)
+            max_comments_per_note: Number($('settingMaxComments').value || 50),
+            enable_follow_actions: $('settingEnableFollowActions').checked
           },
           sales: {
             redact_user: $('settingRedactUser').checked

@@ -34,6 +34,22 @@ class XhsAdapterErrorTests(unittest.TestCase):
         message = self.make_adapter().normalize_error("API error: 当前 IP异常，请稍后重试")
         self.assertIn("小红书接口返回风控/IP异常", message)
 
+    def test_follow_user_uses_structured_single_target_command(self) -> None:
+        adapter = self.make_adapter()
+        calls = []
+
+        def fake_run(args, timeout=90):
+            calls.append((args, timeout))
+            return {"ok": True, "data": {"followed": True}}
+
+        adapter.run = fake_run  # type: ignore[method-assign]
+        self.assertEqual(adapter.follow_user("user-123")["ok"], True)
+        self.assertEqual(calls, [(["follow", "user-123", "--json"], 60)])
+
+    def test_follow_user_rejects_empty_target(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "缺少可关注"):
+            self.make_adapter().follow_user("")
+
 
 if __name__ == "__main__":
     unittest.main()

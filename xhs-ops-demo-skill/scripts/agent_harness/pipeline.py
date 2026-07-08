@@ -65,6 +65,23 @@ class HarnessPipeline:
         emit("info", "总控编排 Agent", "理解任务并拆分多 Agent 执行计划...")
         chief = runner.run("chief_orchestrator", task_context, purpose="任务理解与阶段编排")
         emit("success", "总控编排 Agent", str(chief.get("decision") or "执行计划已生成。"), chief)
+        self._audit_stage(
+            task_id,
+            stage="orchestrate",
+            agent_key="chief_orchestrator",
+            decision="completed",
+            reason=str(chief.get("decision") or chief.get("strategy_summary") or "总控编排 Agent 已生成任务策略。"),
+            evidence=chief.get("evidence") or chief.get("stages") or [],
+            confidence=chief.get("confidence"),
+            payload={
+                "strategy_summary": chief.get("strategy_summary"),
+                "target_customer_profile": chief.get("target_customer_profile"),
+                "demand_scope": chief.get("demand_scope"),
+                "exclusions": chief.get("exclusions"),
+                "stages": chief.get("stages"),
+                "review_policy": chief.get("review_policy"),
+            },
+        )
 
         progress({"stage": "plan", "percent": 8, "current": 0, "total": 1})
         emit("info", "搜索规划 Agent", "生成搜索策略和关键词包...")
@@ -72,6 +89,23 @@ class HarnessPipeline:
         settings["planning"] = planning
         keywords = self._keywords(planning)
         emit("success", "搜索规划 Agent", f"生成 {len(keywords)} 个 LLM 规划搜索词。", {"keywords": keywords, "planning": planning})
+        self._audit_stage(
+            task_id,
+            stage="plan",
+            agent_key="planning_agent",
+            decision="completed",
+            reason=str(planning.get("strategy_summary") or planning.get("decision") or "搜索规划 Agent 已生成搜索策略。"),
+            evidence=keywords,
+            confidence=planning.get("confidence"),
+            payload={
+                "strategy_summary": planning.get("strategy_summary"),
+                "target_customer_profile": planning.get("target_customer_profile"),
+                "exclusions": planning.get("exclusions"),
+                "geo_constraints": planning.get("geo_constraints"),
+                "keywords": keywords,
+                "hypotheses": planning.get("hypotheses"),
+            },
+        )
         self._audit_planned_keywords(task_id, keywords, planning)
 
         raw_notes = self._collect_raw_notes(keywords, settings, page, task_id, stop_checker, emit, progress)
@@ -82,16 +116,50 @@ class HarnessPipeline:
         if settings["readDetail"]:
             progress({"stage": "read_detail", "percent": 42, "current": 0, "total": len(selected)})
             selected = self._enrich_notes(selected, settings, stop_checker, emit, progress)
+            self._audit_stage(
+                task_id,
+                stage="read_detail",
+                agent_key="tool_harness",
+                decision="completed",
+                reason=f"已读取 {len(selected)} 篇候选笔记详情。",
+                evidence=[note.get("title") or note.get("id") for note in selected[:20]],
+                payload={"notes_count": len(selected), "read_detail": True},
+            )
         else:
             emit("info", "工具 Harness", "已按用户设置跳过详情读取。")
+            self._audit_stage(
+                task_id,
+                stage="read_detail",
+                agent_key="tool_harness",
+                decision="skipped",
+                reason="用户关闭了读取笔记详情，本阶段跳过。",
+                payload={"read_detail": False},
+            )
 
         comments: list[dict[str, Any]] = []
         total_comments = 0
         if settings["scanLeads"]:
             progress({"stage": "comments", "percent": 56, "current": 0, "total": len(selected)})
             comments, total_comments = self._collect_comments(selected, settings, task_id, stop_checker, emit, progress)
+            self._audit_stage(
+                task_id,
+                stage="comments",
+                agent_key="tool_harness",
+                decision="completed",
+                reason=f"已从 {len(selected)} 篇笔记中扫描 {total_comments} 条评论。",
+                evidence=[comment.get("comment_id") for comment in comments[:20]],
+                payload={"notes_count": len(selected), "comments_count": total_comments, "scan_leads": True},
+            )
         else:
             emit("info", "工具 Harness", "已按用户设置跳过评论扫描。")
+            self._audit_stage(
+                task_id,
+                stage="comments",
+                agent_key="tool_harness",
+                decision="skipped",
+                reason="用户关闭了评论扫描，本阶段跳过。",
+                payload={"scan_leads": False},
+            )
 
         progress({"stage": "lead_signal", "percent": 68, "current": 0, "total": len(comments)})
         leads = self._judge_leads(runner, selected, comments, settings, task_id, stop_checker, emit)
@@ -100,7 +168,7 @@ class HarnessPipeline:
         leads, distribution = self._apply_product_strategy(runner, leads, selected, settings, task_id, emit)
 
         progress({"stage": "qa", "percent": 84, "current": 0, "total": 1})
-        qa = self._run_qa(runner, selected, leads, distribution, settings, emit)
+        qa = self._run_qa(runner, selected, leads, distribution, settings, task_id, emit)
 
         for idx, note in enumerate(sorted(selected, key=lambda item: item.get(settings["metric"], 0), reverse=True), 1):
             note["rank"] = idx
@@ -111,7 +179,7 @@ class HarnessPipeline:
                 self.storage.save_lead(task_id, lead)
 
         progress({"stage": "report", "percent": 90, "current": 1, "total": 1})
-        report = self._make_report(runner, selected, leads, distribution, qa, settings, emit)
+        report = self._make_report(runner, selected, leads, distribution, qa, settings, task_id, emit)
 
         progress({"stage": "reflection", "percent": 95, "current": 1, "total": 1})
         reflection = self._reflect_and_evolve(runner, evaluator, task_id, selected, leads, report, qa, emit)
@@ -631,6 +699,14 @@ class HarnessPipeline:
         emit: Any,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if not leads:
+            self._audit_stage(
+                task_id,
+                stage="product_strategy",
+                agent_key="product_strategy_agent",
+                decision="skipped",
+                reason="没有达到阈值的线索，产品策略阶段跳过。",
+                payload={"leads_count": 0},
+            )
             return [], []
         emit("info", "产品策略 Agent", "匹配产品方向并生成低打扰人工话术...")
         result = runner.run(
@@ -678,6 +754,20 @@ class HarnessPipeline:
                 f"产品策略覆盖率 {len(leads) - len(missing_leads)}/{len(leads)}。",
             )
         audit_items = []
+        audit_items.append(self._stage_audit_item(
+            stage="product_strategy",
+            agent_key="product_strategy_agent",
+            decision="completed",
+            reason=str(result.get("decision") or f"已处理 {len(leads)} 条线索的产品策略。"),
+            evidence=result.get("evidence") or result.get("lead_updates") or [],
+            confidence=result.get("confidence"),
+            payload={
+                "leads_count": len(leads),
+                "lead_updates_count": len(updates),
+                "missing_leads": [lead.get("lead_id") for lead in missing_leads],
+                "product_distribution": result.get("productDistribution"),
+            },
+        ))
         for lead in leads:
             update = updates.get(str(lead.get("lead_id"))) or {}
             lead["recommended_products"] = update.get("recommended_products") or lead.get("recommended_products") or ""
@@ -718,6 +808,7 @@ class HarnessPipeline:
         leads: list[dict[str, Any]],
         distribution: list[dict[str, Any]],
         settings: dict[str, Any],
+        task_id: int | None,
         emit: Any,
     ) -> dict[str, Any]:
         emit("info", "质检风控 Agent", "检查证据一致性、幻觉风险和合规边界...")
@@ -739,6 +830,40 @@ class HarnessPipeline:
             for lead in leads:
                 if target_id and target_id == str(lead.get("lead_id")):
                     lead.setdefault("qa_issues", []).append(issue)
+        audit_items = [self._stage_audit_item(
+            stage="qa",
+            agent_key="critic_qa_agent",
+            decision="approved" if qa.get("approved", True) else "needs_review",
+            reason=str(qa.get("decision") or f"QA 完成，发现 {len(issues)} 个问题。"),
+            evidence=qa.get("evidence") or issues,
+            confidence=qa.get("confidence"),
+            risk="；".join(str(item.get("message") or "") for item in issues[:5] if isinstance(item, dict)),
+            payload={
+                "approved": qa.get("approved", True),
+                "issues_count": len(issues),
+                "review_requests": qa.get("review_requests") or [],
+            },
+        )]
+        for index, issue in enumerate(issues, 1):
+            if not isinstance(issue, dict):
+                continue
+            level = str(issue.get("level") or "").lower()
+            target_id = str(issue.get("target_id") or f"issue:{index}")
+            audit_items.append({
+                "stage": "qa",
+                "entity_type": "lead" if target_id and not target_id.startswith("issue:") else "task",
+                "entity_id": target_id,
+                "note_id": "",
+                "source_keyword": "",
+                "decision": "reject" if level == "error" else ("warning" if level == "warning" else "needs_review"),
+                "reason": str(issue.get("message") or "QA 发现需要人工复核的问题。"),
+                "evidence": issue.get("evidence") or [],
+                "confidence": qa.get("confidence"),
+                "priority": level.upper()[:1],
+                "risk": str(issue.get("suggested_action") or ""),
+                "payload": {"issue": issue, "approved": qa.get("approved", True)},
+            })
+        self._save_audit(task_id, audit_items)
         emit("success" if qa.get("approved", True) else "warning", "质检风控 Agent", f"QA 完成，发现 {len(issues)} 个问题。", qa)
         return qa
 
@@ -750,6 +875,7 @@ class HarnessPipeline:
         distribution: list[dict[str, Any]],
         qa: dict[str, Any],
         settings: dict[str, Any],
+        task_id: int | None,
         emit: Any,
     ) -> dict[str, Any]:
         emit("info", "报告 Agent", "生成 LLM 获客报告...")
@@ -768,6 +894,44 @@ class HarnessPipeline:
             purpose="获客报告生成",
         )
         report["productDistribution"] = report.get("productDistribution") or distribution
+        audit_items = [self._stage_audit_item(
+            stage="report",
+            agent_key="report_agent",
+            decision="generated",
+            reason=str(report.get("summary") or report.get("decision") or "获客报告已生成。"),
+            evidence=report.get("insights") or report.get("recommended_actions") or [],
+            confidence=report.get("confidence"),
+            risk="；".join(str(item) for item in (report.get("risks") or [])[:5]),
+            payload={
+                "summary": report.get("summary"),
+                "insights": report.get("insights"),
+                "recommended_actions": report.get("recommended_actions"),
+                "product_distribution": report.get("productDistribution"),
+            },
+        )]
+        for index, action in enumerate(report.get("recommended_actions") or [], 1):
+            audit_items.append({
+                "stage": "report",
+                "entity_type": "task",
+                "entity_id": f"recommended_action:{index}",
+                "decision": "recommended_action",
+                "reason": self._text_value(action, "报告 Agent 生成的推荐动作。"),
+                "evidence": report.get("summary") or "",
+                "confidence": report.get("confidence"),
+                "payload": {"action": action},
+            })
+        for index, risk in enumerate(report.get("risks") or [], 1):
+            audit_items.append({
+                "stage": "report",
+                "entity_type": "task",
+                "entity_id": f"risk:{index}",
+                "decision": "risk_warning",
+                "reason": self._text_value(risk, "报告 Agent 生成的风险提示。"),
+                "confidence": report.get("confidence"),
+                "risk": self._text_value(risk, ""),
+                "payload": {"risk": risk},
+            })
+        self._save_audit(task_id, audit_items)
         emit("success", "报告 Agent", "获客报告已生成。")
         return report
 
@@ -794,6 +958,65 @@ class HarnessPipeline:
             for case in reflection.get("eval_cases") or []:
                 self.storage.save_eval_case(task_id, case)
             self._create_prompt_candidates(task_id, reflection, evaluator)
+        audit_items = [self._stage_audit_item(
+            stage="reflection",
+            agent_key="reflection_evolution_agent",
+            decision="completed",
+            reason=str(reflection.get("evolution_summary") or reflection.get("decision") or "复盘进化 Agent 已完成。"),
+            evidence=reflection.get("evidence") or reflection.get("prompt_improvements") or [],
+            confidence=reflection.get("confidence"),
+            risk="；".join(str(item) for item in (reflection.get("risks") or [])[:5]),
+            payload={
+                "task_summary": reflection.get("task_summary"),
+                "agent_summaries_count": len(reflection.get("agent_summaries") or []),
+                "eval_cases_count": len(reflection.get("eval_cases") or []),
+                "prompt_improvements_count": len(reflection.get("prompt_improvements") or []),
+            },
+        )]
+        for item in reflection.get("agent_summaries") or []:
+            if not isinstance(item, dict):
+                continue
+            agent_key = str(item.get("agent_key") or item.get("agentKey") or item.get("agent") or item.get("agentName") or "agent")
+            audit_items.append({
+                "stage": "reflection",
+                "entity_type": "agent",
+                "entity_id": agent_key,
+                "decision": "review",
+                "reason": self._text_value(item.get("recommendation") or item.get("weaknesses") or item.get("strengths") or item, "复盘进化 Agent 生成的 Agent 表现总结。"),
+                "evidence": item.get("evidence") or [],
+                "confidence": reflection.get("confidence"),
+                "risk": self._text_value(item.get("risk") or "", ""),
+                "payload": {"agent_summary": item},
+            })
+        for index, item in enumerate(reflection.get("prompt_improvements") or [], 1):
+            if not isinstance(item, dict):
+                continue
+            agent_key = str(item.get("agent_key") or item.get("agentKey") or "agent")
+            audit_items.append({
+                "stage": "reflection",
+                "entity_type": "agent",
+                "entity_id": agent_key,
+                "decision": "prompt_candidate",
+                "reason": str(item.get("title") or item.get("expected_gain") or f"Prompt 改进建议 {index}"),
+                "evidence": item.get("prompt_patch") or "",
+                "confidence": reflection.get("confidence"),
+                "risk": self._text_value(item.get("risk") or "", ""),
+                "payload": {"prompt_improvement": item},
+            })
+        for index, case in enumerate(reflection.get("eval_cases") or [], 1):
+            if not isinstance(case, dict):
+                continue
+            audit_items.append({
+                "stage": "reflection",
+                "entity_type": "eval_case",
+                "entity_id": str(case.get("id") or f"eval_case:{index}"),
+                "decision": "generated",
+                "reason": self._text_value(case.get("expected_result") or case.get("description") or "复盘进化 Agent 生成的评估样例。", ""),
+                "evidence": case.get("evidence") or [],
+                "confidence": reflection.get("confidence"),
+                "payload": {"eval_case": case},
+            })
+        self._save_audit(task_id, audit_items)
         emit("success", "复盘进化 Agent", str(reflection.get("evolution_summary") or "复盘完成。"), reflection)
         return reflection
 
@@ -825,6 +1048,54 @@ class HarnessPipeline:
                 expected_gain=expected_gain,
                 has_safety_risk=has_safety_risk,
             )
+
+    def _audit_stage(
+        self,
+        task_id: int | None,
+        *,
+        stage: str,
+        agent_key: str,
+        decision: str,
+        reason: str,
+        evidence: Any = None,
+        confidence: Any = None,
+        risk: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        self._save_audit(task_id, [self._stage_audit_item(
+            stage=stage,
+            agent_key=agent_key,
+            decision=decision,
+            reason=reason,
+            evidence=evidence,
+            confidence=confidence,
+            risk=risk,
+            payload=payload,
+        )])
+
+    def _stage_audit_item(
+        self,
+        *,
+        stage: str,
+        agent_key: str,
+        decision: str,
+        reason: str,
+        evidence: Any = None,
+        confidence: Any = None,
+        risk: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "stage": stage,
+            "entity_type": "agent",
+            "entity_id": agent_key,
+            "decision": decision,
+            "reason": reason,
+            "evidence": evidence if evidence is not None else [],
+            "confidence": confidence,
+            "risk": risk,
+            "payload": {"agent_key": agent_key, **(payload or {})},
+        }
 
     def _audit_planned_keywords(self, task_id: int | None, keywords: list[str], planning: dict[str, Any]) -> None:
         hypotheses = planning.get("hypotheses") or []
@@ -1161,7 +1432,7 @@ class HarnessPipeline:
     def _safety(self, settings: dict[str, Any]) -> dict[str, Any]:
         return {
             "mode": "read-only",
-            "actions": "status/search/read/comments only; no like/favorite/comment/follow/post/private message",
+            "actions": "task collection uses status/search/read/comments only; no automatic like/favorite/comment/follow/post/private message. Follow is only allowed from the UI after per-lead user confirmation; private messages are draft-only and never auto-sent.",
             "xhsCommand": " ".join(getattr(self.adapter, "command", [])),
             "delayMin": settings.get("delayMin"),
             "delayMax": settings.get("delayMax"),

@@ -154,3 +154,9 @@ class XhsAdapter:
         if cursor:
             args.extend(["--cursor", cursor])
         return self.run(args, timeout=90)
+
+    def follow_user(self, user_id: str) -> dict[str, Any]:
+        target = str(user_id or "").strip()
+        if not target:
+            raise RuntimeError("缺少可关注的小红书用户 ID。")
+        return self.run(["follow", target, "--json"], timeout=60)

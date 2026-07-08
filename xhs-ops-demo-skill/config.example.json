@@ -8,7 +8,8 @@
     "read_delay_min": 7,
     "read_delay_max": 60,
     "max_count": 20,
-    "max_comments_per_note": 50
+    "max_comments_per_note": 50,
+    "enable_follow_actions": false
   },
   "llm": {
     "api_key": "",
