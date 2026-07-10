@@ -308,6 +308,9 @@ class DouyinPlatformTests(unittest.TestCase):
         self.assertTrue(lead["lead_id"].startswith("douyin:aweme-1:"))
         self.assertEqual(lead["target_user_id"], "sec-user-1")
         self.assertEqual(storage.get_lead(lead["lead_id"])["platform"], "douyin")
+        relevance_audit = storage.list_audit_decisions(task_id, stage="relevance", platform="douyin")
+        self.assertGreater(relevance_audit["total"], 0)
+        self.assertEqual(storage.list_audit_decisions(task_id, stage="relevance", platform="xhs")["total"], 0)
 
 
 if __name__ == "__main__":

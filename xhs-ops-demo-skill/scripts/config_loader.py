@@ -7,6 +7,8 @@ import platform
 from pathlib import Path
 from typing import Any
 
+from product_catalog import business_direction_options
+
 
 ROOT = Path(__file__).resolve().parent.parent
 LEGACY_STORAGE_URL_KEY = "database" + "_url"
@@ -140,6 +142,8 @@ def public_settings(config: dict[str, Any]) -> dict[str, Any]:
     sales = config.get("sales") or {}
     socialdatax_env = str(socialdatax.get("api_key_env") or "SOCIALDATAX_API_KEY")
     return {
+        "businessDirections": business_direction_options(),
+        "defaultBusinessDirection": str(sales.get("default_business_direction") or "cloud_ai"),
         "llm": {
             "api_base": llm.get("api_base", ""),
             "model": llm.get("model", ""),
@@ -172,6 +176,7 @@ def public_settings(config: dict[str, Any]) -> dict[str, Any]:
         },
         "sales": {
             "redact_user": bool(sales.get("redact_user", False)),
+            "default_business_direction": str(sales.get("default_business_direction") or "cloud_ai"),
         },
         "storage": {
             "backend": "sqlite",
@@ -244,6 +249,8 @@ def update_local_settings(payload: dict[str, Any]) -> dict[str, Any]:
     sales = local_config.setdefault("sales", {})
     if "redact_user" in sales_payload:
         sales["redact_user"] = bool(sales_payload.get("redact_user"))
+    if "default_business_direction" in sales_payload:
+        sales["default_business_direction"] = str(sales_payload.get("default_business_direction") or "cloud_ai").strip() or "cloud_ai"
 
     local_config.setdefault("storage", {}).pop(LEGACY_STORAGE_URL_KEY, None)
     save_local_config(local_config)

@@ -8,38 +8,52 @@ BUSINESS_DIRECTIONS: dict[str, dict[str, Any]] = {
     "cloud_ai": {
         "label": "开放需求获客（默认）",
         "keywords": ["求推荐方案", "预算报价", "成本太高", "怎么选服务商", "有没有靠谱", "想找供应商"],
+        "description": "按需求描述开放挖掘线索，产品匹配由 Agent 结合证据和目录判断。",
     },
     "cloud_agent": {
         "label": "云服务成本优化",
         "keywords": ["云服务优惠", "云服务代理", "云服务器续费贵", "服务器到期", "企业上云优惠"],
+        "description": "寻找云资源采购、续费、降本和代理咨询线索。",
     },
     "cloud_infra": {
         "label": "云服务器 / 数据库 / 存储",
         "keywords": ["云服务器配置", "云数据库迁移", "对象存储", "服务器带宽", "数据库上云"],
+        "description": "寻找基础云资源、数据库、存储和带宽相关采购或迁移需求。",
     },
     "migration": {
         "label": "迁移上云",
         "keywords": ["迁移上云", "本地服务器迁云", "数据库迁移", "企业上云方案", "业务上云"],
+        "description": "寻找本地系统、数据库或业务迁移上云需求。",
     },
     "meeting": {
         "label": "会议 / 企业协同",
         "keywords": ["企业会议系统", "远程会议系统", "视频会议采购", "会议安全", "在线协作方案"],
+        "description": "寻找会议、协同办公、音视频和企业沟通场景需求。",
     },
     "security": {
         "label": "网络安全",
         "keywords": ["网站被攻击", "云防火墙", "等保测评", "DDoS防护", "Web安全防护"],
+        "description": "寻找安全防护、等保、攻击处置和安全合规需求。",
     },
     "ai_private_deploy": {
         "label": "大模型私有化部署",
         "keywords": ["DeepSeek私有化部署", "企业知识库AI", "本地部署大模型", "内网AI助手", "大模型私有化"],
+        "description": "寻找企业大模型、知识库、内网 AI 和私有化部署需求。",
     },
     "ai_app": {
         "label": "AI 应用开发",
         "keywords": ["AI客服", "智能体开发", "企业AI助手", "营销AI助手", "内容自动化"],
+        "description": "寻找智能体、AI 客服、AI 助手和业务流程自动化需求。",
+    },
+    "ai_training_bridge": {
+        "label": "AI 培训桥接转化",
+        "keywords": ["企业AI内训 方案", "智能体培训 报名", "AI落地培训 报价", "大模型培训 费用", "AI应用开发 培训"],
+        "description": "把 AI 培训作为入口，桥接到 AI 应用开发、智能体落地或大模型部署；纯个人学习默认降权。",
     },
     "gpu_compute": {
         "label": "GPU 算力",
         "keywords": ["GPU算力租用", "模型训练算力", "大模型训练平台", "AIGC算力", "GPU服务器"],
+        "description": "寻找模型训练、推理、GPU 租用和算力测试需求。",
     },
 }
 
@@ -114,8 +128,16 @@ PURCHASE_TERMS = [
 ]
 
 
-def business_direction_options() -> list[dict[str, str]]:
-    return [{"value": key, "label": value["label"]} for key, value in BUSINESS_DIRECTIONS.items()]
+def business_direction_options() -> list[dict[str, Any]]:
+    return [
+        {
+            "value": key,
+            "label": value["label"],
+            "keywords": value.get("keywords", []),
+            "description": value.get("description", ""),
+        }
+        for key, value in BUSINESS_DIRECTIONS.items()
+    ]
 
 
 def build_keywords(direction: str, industry: str = "", region: str = "", custom: str = "") -> list[str]:

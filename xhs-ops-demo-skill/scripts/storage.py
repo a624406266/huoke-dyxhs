@@ -14,6 +14,7 @@ from typing import Any, Iterator
 PASSWORD_HASH_ALGORITHM = "pbkdf2_sha256"
 PASSWORD_HASH_ITERATIONS = 260000
 LEGACY_SALES_USER_ID = 0
+PROMPT_ITERATION_START = "V0.1"
 
 
 def hash_password(password: str) -> str:
@@ -47,6 +48,26 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 def is_password_hash(value: str) -> bool:
     return str(value or "").startswith(f"{PASSWORD_HASH_ALGORITHM}$")
+
+
+def parse_prompt_iteration_version(value: str | None) -> tuple[int, int]:
+    text = str(value or "").strip().upper()
+    if text.startswith("V"):
+        text = text[1:]
+    major_text, _, minor_text = text.partition(".")
+    try:
+        major = int(major_text)
+        minor = int(minor_text or "0")
+    except Exception:
+        return (0, 1)
+    return (max(0, major), max(0, minor))
+
+
+def normalize_prompt_iteration_version(value: str | None) -> str:
+    major, minor = parse_prompt_iteration_version(value)
+    if (major, minor) < (0, 1):
+        return PROMPT_ITERATION_START
+    return f"V{major}.{minor}"
 
 
 class SalesStorage:
@@ -126,6 +147,8 @@ class SalesStorage:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id INTEGER NOT NULL,
                     sales_user_id INTEGER NOT NULL DEFAULT 0,
+                    run_id TEXT,
+                    run_type TEXT NOT NULL DEFAULT 'main',
                     platform TEXT NOT NULL DEFAULT 'xhs',
                     stage TEXT NOT NULL,
                     entity_type TEXT NOT NULL,
@@ -221,6 +244,8 @@ class SalesStorage:
                 CREATE TABLE IF NOT EXISTS agent_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id INTEGER NOT NULL,
+                    run_id TEXT,
+                    run_type TEXT NOT NULL DEFAULT 'main',
                     agent_key TEXT NOT NULL,
                     agent_name TEXT NOT NULL,
                     prompt_version TEXT,
@@ -238,6 +263,7 @@ class SalesStorage:
                     agent_key TEXT NOT NULL,
                     agent_name TEXT NOT NULL,
                     version TEXT NOT NULL,
+                    iteration_version TEXT NOT NULL DEFAULT 'V0.1',
                     status TEXT NOT NULL,
                     score REAL,
                     prompt TEXT NOT NULL,
@@ -302,11 +328,32 @@ class SalesStorage:
         )
         for table in ("notes", "comments", "leads", "lead_feedback", "task_summaries"):
             self._add_columns(conn, table, {"sales_user_id": "INTEGER NOT NULL DEFAULT 0"})
-        self._add_columns(conn, "audit_decisions", {"platform": "TEXT NOT NULL DEFAULT 'xhs'"})
+        self._add_columns(
+            conn,
+            "audit_decisions",
+            {
+                "run_id": "TEXT",
+                "run_type": "TEXT NOT NULL DEFAULT 'main'",
+                "platform": "TEXT NOT NULL DEFAULT 'xhs'",
+            },
+        )
+        self._add_columns(
+            conn,
+            "agent_runs",
+            {
+                "run_id": "TEXT",
+                "run_type": "TEXT NOT NULL DEFAULT 'main'",
+            },
+        )
+        self._add_columns(conn, "prompt_versions", {"iteration_version": "TEXT NOT NULL DEFAULT 'V0.1'"})
         for table in ("notes", "comments", "leads"):
             self._add_columns(conn, table, {"platform": "TEXT NOT NULL DEFAULT 'xhs'"})
             conn.execute(f"UPDATE {table} SET platform = 'xhs' WHERE platform IS NULL OR platform = ''")
         conn.execute("UPDATE audit_decisions SET platform = 'xhs' WHERE platform IS NULL OR platform = ''")
+        conn.execute("UPDATE audit_decisions SET run_type = 'main' WHERE run_type IS NULL OR run_type = ''")
+        conn.execute("UPDATE agent_runs SET run_type = 'main' WHERE run_type IS NULL OR run_type = ''")
+        conn.execute("UPDATE prompt_versions SET iteration_version = ? WHERE iteration_version IS NULL OR iteration_version = ''", (PROMPT_ITERATION_START,))
+        self._backfill_audit_platform_from_payload(conn)
         self._backfill_sales_user_ids(conn)
 
     def _add_columns(self, conn: Any, table: str, additions: dict[str, str]) -> None:
@@ -327,6 +374,7 @@ class SalesStorage:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_decisions_task ON audit_decisions(task_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_decisions_sales ON audit_decisions(sales_user_id, task_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_decisions_platform ON audit_decisions(task_id, platform)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_decisions_run ON audit_decisions(task_id, run_type, run_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_decisions_stage ON audit_decisions(task_id, stage, entity_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_decisions_keyword ON audit_decisions(task_id, source_keyword)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_task_id ON notes(task_id)")
@@ -341,6 +389,7 @@ class SalesStorage:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_lead_feedback_task_id ON lead_feedback(task_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_lead_feedback_sales_user ON lead_feedback(sales_user_id, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_task_id ON agent_runs(task_id, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_run ON agent_runs(task_id, run_type, run_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_prompt_versions_agent_status ON prompt_versions(agent_key, status)")
 
     def _backfill_sales_user_ids(self, conn: Any) -> None:
@@ -1027,6 +1076,8 @@ class SalesStorage:
                     (
                         int(task_id),
                         sales_user_id,
+                        str(item.get("run_id") or item.get("runId") or ""),
+                        str(item.get("run_type") or item.get("runType") or "main"),
                         str(item.get("platform") or "xhs"),
                         str(item.get("stage") or ""),
                         str(item.get("entity_type") or item.get("entityType") or ""),
@@ -1046,12 +1097,29 @@ class SalesStorage:
                 )
             conn.executemany(
                 """
-                INSERT INTO audit_decisions(task_id, sales_user_id, platform, stage, entity_type, entity_id, note_id,
+                INSERT INTO audit_decisions(task_id, sales_user_id, run_id, run_type, platform, stage, entity_type, entity_id, note_id,
                 source_keyword, decision, reason, evidence_json, score, confidence, priority, risk, payload_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
+
+    def _backfill_audit_platform_from_payload(self, conn: Any) -> None:
+        rows = conn.execute(
+            """
+            SELECT id, platform, payload_json
+            FROM audit_decisions
+            WHERE stage = 'relevance' AND COALESCE(payload_json, '') != ''
+            """
+        ).fetchall()
+        for row in rows:
+            if row["platform"] not in ("", "xhs", None):
+                continue
+            payload = self._json_loads(row["payload_json"], {})
+            note = payload.get("note") if isinstance(payload, dict) else {}
+            platform = str((note or {}).get("platform") or "").strip()
+            if platform and platform != row["platform"]:
+                conn.execute("UPDATE audit_decisions SET platform = ? WHERE id = ?", (platform, row["id"]))
 
     def save_audit_decision(self, task_id: int | None, **item: Any) -> None:
         self.save_audit_decisions(task_id, [item])
@@ -1064,6 +1132,9 @@ class SalesStorage:
         entity_type: str = "",
         decision: str = "",
         keyword: str = "",
+        platform: str = "",
+        run_id: str = "",
+        run_type: str = "",
         limit: int = 100,
         offset: int = 0,
         sales_user_id: int | None = None,
@@ -1085,6 +1156,15 @@ class SalesStorage:
         if keyword:
             filters.append("source_keyword LIKE ?")
             params.append(f"%{keyword}%")
+        if platform:
+            filters.append("platform = ?")
+            params.append(platform)
+        if run_id:
+            filters.append("run_id = ?")
+            params.append(run_id)
+        if run_type:
+            filters.append("run_type = ?")
+            params.append(run_type)
         where = " AND ".join(filters)
         limit = min(max(int(limit), 1), 200)
         offset = max(int(offset), 0)
@@ -1121,6 +1201,8 @@ class SalesStorage:
             "id": int(row["id"]),
             "taskId": int(row["task_id"]),
             "salesUserId": int(row["sales_user_id"] or LEGACY_SALES_USER_ID),
+            "runId": row["run_id"] or "",
+            "runType": row["run_type"] or "main",
             "platform": row["platform"] or "xhs",
             "stage": row["stage"] or "",
             "entityType": row["entity_type"] or "",
@@ -1374,16 +1456,20 @@ class SalesStorage:
         confidence: float,
         error: str,
         duration_ms: int,
+        run_id: str = "",
+        run_type: str = "main",
     ) -> None:
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO agent_runs(task_id, agent_key, agent_name, prompt_version, model, purpose,
+                INSERT INTO agent_runs(task_id, run_id, run_type, agent_key, agent_name, prompt_version, model, purpose,
                 input_summary, output_summary, confidence, error, duration_ms, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
+                    run_id,
+                    run_type or "main",
                     agent_key,
                     agent_name,
                     prompt_version,
@@ -1398,17 +1484,33 @@ class SalesStorage:
                 ),
             )
 
-    def list_agent_runs(self, task_id: int | None = None, limit: int = 200) -> list[dict[str, Any]]:
+    def list_agent_runs(
+        self,
+        task_id: int | None = None,
+        limit: int = 200,
+        *,
+        run_id: str = "",
+        run_type: str = "",
+    ) -> list[dict[str, Any]]:
         with self.connect() as conn:
             if task_id:
+                filters = ["task_id = ?"]
+                params: list[Any] = [task_id]
+                if run_id:
+                    filters.append("run_id = ?")
+                    params.append(run_id)
+                if run_type:
+                    filters.append("run_type = ?")
+                    params.append(run_type)
+                where = " AND ".join(filters)
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT * FROM agent_runs
-                    WHERE task_id = ?
+                    WHERE {where}
                     ORDER BY id ASC
                     LIMIT ?
                     """,
-                    (task_id, limit),
+                    [*params, limit],
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -1426,6 +1528,8 @@ class SalesStorage:
         return {
             "id": int(row["id"]),
             "taskId": int(row["task_id"]),
+            "runId": row["run_id"] or "",
+            "runType": row["run_type"] or "main",
             "agentKey": row["agent_key"],
             "agentName": row["agent_name"],
             "promptVersion": row["prompt_version"] or "",
@@ -1450,8 +1554,10 @@ class SalesStorage:
         score: float,
         notes: str = "",
         source_task_id: int | None = None,
+        iteration_version: str | None = None,
     ) -> int:
         now = time.time()
+        display_iteration = normalize_prompt_iteration_version(iteration_version)
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT id FROM prompt_versions WHERE agent_key = ? AND version = ?",
@@ -1465,14 +1571,15 @@ class SalesStorage:
             ).fetchone()
             insert_status = status if not active else ("candidate" if status == "active" else status)
             insert_sql = """
-                INSERT INTO prompt_versions(agent_key, agent_name, version, status, score, prompt, notes,
+                INSERT INTO prompt_versions(agent_key, agent_name, version, iteration_version, status, score, prompt, notes,
                 source_task_id, metrics, created_at, activated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             values = (
                 agent_key,
                 agent_name,
                 version,
+                display_iteration,
                 insert_status,
                 float(score),
                 prompt,
@@ -1495,7 +1602,8 @@ class SalesStorage:
         source_task_id: int,
         notes: str,
     ) -> int:
-        version = f"{base_version}-evo-{int(time.time())}"
+        iteration_version = self.next_prompt_iteration_version(agent_key)
+        version = f"{agent_key}-{iteration_version.lower()}-evo-{int(time.time())}"
         return self.ensure_prompt_version(
             agent_key=agent_key,
             agent_name=agent_name,
@@ -1505,7 +1613,23 @@ class SalesStorage:
             score=0.0,
             notes=notes,
             source_task_id=source_task_id,
+            iteration_version=iteration_version,
         )
+
+    def next_prompt_iteration_version(self, agent_key: str) -> str:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT iteration_version FROM prompt_versions WHERE agent_key = ?",
+                (agent_key,),
+            ).fetchall()
+        max_major, max_minor = 0, 0
+        for row in rows:
+            major, minor = parse_prompt_iteration_version(row["iteration_version"])
+            if (major, minor) > (max_major, max_minor):
+                max_major, max_minor = major, minor
+        if (max_major, max_minor) < (0, 1):
+            return PROMPT_ITERATION_START
+        return f"V{max_major}.{max_minor + 1}"
 
     def get_active_prompt(self, agent_key: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -1625,6 +1749,7 @@ class SalesStorage:
             "agentKey": row["agent_key"],
             "agentName": row["agent_name"],
             "version": row["version"],
+            "iterationVersion": row["iteration_version"] or PROMPT_ITERATION_START,
             "status": row["status"],
             "score": float(row["score"] or 0.0),
             "prompt": row["prompt"],

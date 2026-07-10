@@ -17,12 +17,16 @@ class StructuredAgentRunner:
         task_id: int | None = None,
         registry: PromptRegistry | None = None,
         llm_json_callable: Callable[..., tuple[dict[str, Any], str]] | None = None,
+        run_id: str = "",
+        run_type: str = "main",
     ) -> None:
         self.config = config
         self.storage = storage
         self.task_id = task_id
         self.registry = registry or PromptRegistry(storage)
         self.llm_json_callable = llm_json_callable or call_llm_json
+        self.run_id = run_id
+        self.run_type = run_type or "main"
 
     def run(self, agent_key: str, payload: dict[str, Any], *, purpose: str = "") -> dict[str, Any]:
         spec = self.registry.spec(agent_key)
@@ -48,6 +52,10 @@ class StructuredAgentRunner:
                         "如果用户输入中包含 outputContract，必须优先满足其中的覆盖率、字段和枚举要求。"
                         "当 outputContract 要求对每个输入实体返回判断时，不得只返回正例或高置信项；"
                         "非商机、低分、低置信和丢弃项也必须逐条返回可审计 reason。"
+                        "如果旧 Prompt 出现“小红书”单平台表述，必须按输入中的 platforms/platformLabels 理解为当前公开采集平台，"
+                        "不得在抖音或多平台任务中把任务错误描述成小红书任务。"
+                        "如果 strategy.bridgePolicy.mode 为 ai_training_bridge，必须把 AI 培训作为桥接入口，"
+                        "不得承诺正式培训产品；同行/中介和个人求职学习流量必须降权。"
                     ),
                 },
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -73,7 +81,7 @@ class StructuredAgentRunner:
                     task_id=self.task_id,
                     agent_key=agent_key,
                     agent_name=spec.name,
-                    prompt_version=str(prompt.get("version") or spec.version),
+                    prompt_version=prompt_version_label(prompt, spec.version),
                     model=model,
                     purpose=purpose,
                     input_summary=input_summary,
@@ -81,6 +89,8 @@ class StructuredAgentRunner:
                     confidence=float(output.get("confidence", 0.0)) if isinstance(output, dict) else 0.0,
                     error=error[:1000],
                     duration_ms=duration_ms,
+                    run_id=self.run_id,
+                    run_type=self.run_type,
                 )
 
     def _validate_common(self, agent_key: str, output: dict[str, Any]) -> None:
@@ -109,3 +119,11 @@ def _compact(value: Any, limit: int = 4000) -> str:
     else:
         text = json.dumps(value, ensure_ascii=False, default=str)
     return text[:limit]
+
+
+def prompt_version_label(prompt: dict[str, Any], fallback_version: str) -> str:
+    iteration = str(prompt.get("iterationVersion") or "").strip()
+    internal = str(prompt.get("version") or fallback_version or "").strip()
+    if iteration and internal and iteration != internal:
+        return f"{iteration} / {internal}"
+    return iteration or internal

@@ -27,6 +27,9 @@ class HarnessPipeline:
         self.config = config
         self.storage = storage
         self.runner = runner
+        self._active_run_id = ""
+        self._active_run_type = "main"
+        self._active_platforms: list[str] = []
 
     def run(
         self,
@@ -43,17 +46,31 @@ class HarnessPipeline:
         if not has_llm_key(llm_config.get("api_key")):
             raise RuntimeError("Harness 模式必须配置 LLM API Key；请在设置中填写 API Key 或设置 LLM_API_KEY/OPENAI_API_KEY。")
 
+        settings = self._settings(payload)
+        self._active_run_id = settings["runId"]
+        self._active_run_type = settings["runType"]
+        self._active_platforms = settings["platforms"]
+
         registry = PromptRegistry(self.storage)
         registry.ensure_defaults()
-        runner = self.runner or StructuredAgentRunner(self.config, self.storage, task_id, registry)
+        runner = self.runner or StructuredAgentRunner(
+            self.config,
+            self.storage,
+            task_id,
+            registry,
+            run_id=settings["runId"],
+            run_type=settings["runType"],
+        )
         evaluator = HarnessEvaluator(self.storage)
 
-        settings = self._settings(payload)
         self._ensure_platforms_ready(settings, emit)
         task_context = {
             "payload": payload,
+            "runId": settings["runId"],
+            "runType": settings["runType"],
             "demandDescription": settings["demandDescription"],
             "userConstraints": settings["userConstraints"],
+            "businessDirection": settings["businessDirection"],
             "businessDirectionLabel": settings["businessDirectionLabel"],
             "availableProducts": self._product_labels(),
             "safety": self._safety(settings),
@@ -195,6 +212,8 @@ class HarnessPipeline:
             "demandDescription": settings["demandDescription"],
             "businessDirection": settings["businessDirection"],
             "businessDirectionLabel": settings["businessDirectionLabel"],
+            "runId": settings["runId"],
+            "runType": settings["runType"],
             "industry": settings["industry"],
             "region": settings["region"],
             "metric": settings["metric"],
@@ -220,7 +239,7 @@ class HarnessPipeline:
             "agentTrace": agent_trace,
             "auditTrail": audit_trail,
             "safety": self._safety(settings),
-            "harness": {"mode": "multi-agent-llm", "reviewPolicy": chief.get("review_policy", {})},
+            "harness": {"mode": "multi-agent-llm", "runId": settings["runId"], "runType": settings["runType"], "reviewPolicy": chief.get("review_policy", {})},
         }
 
     def _settings(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -256,7 +275,11 @@ class HarnessPipeline:
             "douyin": min(max(int(payload.get("maxCommentsPerPost", douyin_config.get("max_comments_per_post", max_comments))), 1), 500),
         }
         geo_constraints = self._geo_constraints(demand_description, str(payload.get("region") or "").strip())
+        run_id = str(payload.get("runId") or payload.get("run_id") or f"task-{int(time.time() * 1000)}").strip()
+        run_type = str(payload.get("runType") or payload.get("run_type") or "main").strip() or "main"
         return {
+            "runId": run_id,
+            "runType": run_type,
             "platforms": platforms,
             "platformLabels": [self._platform_label(platform) for platform in platforms],
             "businessDirection": direction,
@@ -293,6 +316,10 @@ class HarnessPipeline:
                 "geoConstraints": geo_constraints,
                 "legacyBusinessDirection": direction,
                 "legacyBusinessDirectionLabel": direction_label,
+                "businessDirection": direction,
+                "businessDirectionLabel": direction_label,
+                "runId": run_id,
+                "runType": run_type,
             },
         }
 
@@ -417,8 +444,76 @@ class HarnessPipeline:
                 emit("success", "工具 Harness", f"{label}搜索「{keyword}」返回 {len(items)} 条，进入 LLM 相关性判断池。")
             if stop_checker and stop_checker():
                 break
-        notes.sort(key=lambda note: note.get(settings["metric"], 0), reverse=True)
-        return notes[: settings["count"] * max(2, len(keywords))]
+        limit = settings["count"] * max(2, len(keywords))
+        selected = self._balanced_candidate_pool(notes, settings, limit)
+        selected_ids = {f"{note.get('platform') or 'xhs'}:{note.get('id')}" for note in selected}
+        dropped = [
+            note for note in notes
+            if f"{note.get('platform') or 'xhs'}:{note.get('id')}" not in selected_ids
+        ]
+        if dropped:
+            self._save_audit(task_id, [
+                {
+                    "platform": note.get("platform") or "xhs",
+                    "stage": "search",
+                    "entity_type": "note",
+                    "entity_id": note.get("id"),
+                    "note_id": note.get("id"),
+                    "source_keyword": note.get("source_keyword", ""),
+                    "decision": "dropped_candidate_cap",
+                    "reason": "多平台候选池已达到相关性判断上限，按平台均衡配额后暂不送入 LLM。",
+                    "payload": {
+                        "note": self._note_brief(note),
+                        "candidate_limit": limit,
+                        "platforms": settings.get("platforms") or [],
+                    },
+                }
+                for note in dropped
+            ])
+        return selected
+
+    def _balanced_candidate_pool(self, notes: list[dict[str, Any]], settings: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+        metric = settings["metric"]
+        platforms = settings.get("platforms") or ["xhs"]
+        if not notes or limit <= 0:
+            return []
+        if len(platforms) <= 1:
+            return sorted(notes, key=lambda note: note.get(metric, 0), reverse=True)[:limit]
+
+        buckets: dict[str, list[dict[str, Any]]] = {platform: [] for platform in platforms}
+        overflow: list[dict[str, Any]] = []
+        for note in notes:
+            platform = str(note.get("platform") or "xhs")
+            if platform in buckets:
+                buckets[platform].append(note)
+            else:
+                overflow.append(note)
+        for bucket in buckets.values():
+            bucket.sort(key=lambda note: note.get(metric, 0), reverse=True)
+        overflow.sort(key=lambda note: note.get(metric, 0), reverse=True)
+
+        base_quota = max(1, limit // max(1, len(platforms)))
+        remainder = max(0, limit - base_quota * len(platforms))
+        selected: list[dict[str, Any]] = []
+        selected_keys: set[str] = set()
+        for index, platform in enumerate(platforms):
+            quota = base_quota + (1 if index < remainder else 0)
+            for note in buckets.get(platform, [])[:quota]:
+                key = f"{note.get('platform') or 'xhs'}:{note.get('id')}"
+                selected.append(note)
+                selected_keys.add(key)
+
+        remaining = [
+            note for bucket in [*buckets.values(), overflow] for note in bucket
+            if f"{note.get('platform') or 'xhs'}:{note.get('id')}" not in selected_keys
+        ]
+        remaining.sort(key=lambda note: note.get(metric, 0), reverse=True)
+        for note in remaining:
+            if len(selected) >= limit:
+                break
+            selected.append(note)
+        selected.sort(key=lambda note: note.get(metric, 0), reverse=True)
+        return selected[:limit]
 
     def _judge_relevance(
         self,
@@ -485,6 +580,7 @@ class HarnessPipeline:
             if final_decision == "keep":
                 selected.append(note)
             audit_items.append({
+                "platform": note.get("platform") or "xhs",
                 "stage": "relevance",
                 "entity_type": "note",
                 "entity_id": note.get("id"),
@@ -519,6 +615,7 @@ class HarnessPipeline:
                 note["relevance_review"] = decision
                 if decision and str(decision.get("decision", "")).lower() == "drop":
                     self._save_audit(task_id, [{
+                        "platform": note.get("platform") or "xhs",
                         "stage": "relevance",
                         "entity_type": "note",
                         "entity_id": note.get("id"),
@@ -649,7 +746,8 @@ class HarnessPipeline:
                 "outputContract": {
                     "coverage": "Return one leads[] item for every input candidate_id.",
                     "decisions": ["lead", "ignore", "below_threshold"],
-                    "requiredFields": ["candidate_id", "lead_type", "note_id", "comment_id", "decision", "score", "confidence", "reason", "risk"],
+                    "leadProfiles": ["buyer_enterprise", "buyer_individual_high_intent", "peer_vendor", "personal_learning", "unknown"],
+                    "requiredFields": ["candidate_id", "lead_type", "note_id", "comment_id", "decision", "score", "priority", "lead_profile", "confidence", "reason", "risk"],
                 },
             },
             purpose="批量线索信号识别",
@@ -674,7 +772,8 @@ class HarnessPipeline:
                         "outputContract": {
                             "coverage": "Return one leads[] item for every input candidate_id, including ignore decisions.",
                             "decisions": ["lead", "ignore", "below_threshold"],
-                            "requiredFields": ["candidate_id", "lead_type", "note_id", "comment_id", "decision", "score", "confidence", "reason", "risk"],
+                            "leadProfiles": ["buyer_enterprise", "buyer_individual_high_intent", "peer_vendor", "personal_learning", "unknown"],
+                            "requiredFields": ["candidate_id", "lead_type", "note_id", "comment_id", "decision", "score", "priority", "lead_profile", "confidence", "reason", "risk"],
                         },
                     },
                     purpose="线索缺失决策补齐",
@@ -691,7 +790,17 @@ class HarnessPipeline:
         for comment in lead_candidates:
             decision = decisions.get(comment["candidate_id"]) or {}
             raw_decision = str(decision.get("decision", "")).lower()
+            lead_profile = self._lead_profile(decision, comment)
+            if decision:
+                decision["lead_profile"] = lead_profile
             score = min(max(int(decision.get("score") or 0), 0), 100)
+            if lead_profile in {"peer_vendor", "personal_learning"}:
+                score = min(score, 45)
+                decision["score"] = score
+                decision["risk"] = self._append_text(decision.get("risk"), self._lead_profile_risk(lead_profile))
+                if raw_decision == "lead":
+                    raw_decision = "below_threshold"
+                    decision["decision"] = "below_threshold"
             if not decision:
                 audit_items.append(self._lead_audit_item(comment, decision, "missing_decision", "线索识别 Agent 首轮和补齐轮均未返回该候选判断。"))
                 continue
@@ -738,6 +847,7 @@ class HarnessPipeline:
                     lead["confidence"] = float(updated.get("confidence") or lead.get("confidence") or 0)
                     lead["risk"] = updated.get("risk") or lead.get("risk")
                     lead["reason"] = updated.get("reason") or lead.get("reason")
+                    lead["lead_profile"] = self._lead_profile(updated, lead.get("source_comment") or {})
                     if str(updated.get("decision", "")).lower() == "ignore":
                         lead["priority"] = "D"
                         lead["score"] = min(int(lead.get("score") or 0), 30)
@@ -889,6 +999,7 @@ class HarnessPipeline:
             for lead in leads:
                 if target_id and target_id == str(lead.get("lead_id")):
                     lead.setdefault("qa_issues", []).append(issue)
+        self._apply_qa_status(leads, qa)
         audit_items = [self._stage_audit_item(
             stage="qa",
             agent_key="critic_qa_agent",
@@ -909,6 +1020,7 @@ class HarnessPipeline:
             level = str(issue.get("level") or "").lower()
             target_id = str(issue.get("target_id") or f"issue:{index}")
             audit_items.append({
+                "platform": self._issue_platform(issue, leads),
                 "stage": "qa",
                 "entity_type": "lead" if target_id and not target_id.startswith("issue:") else "task",
                 "entity_id": target_id,
@@ -1177,7 +1289,27 @@ class HarnessPipeline:
 
     def _save_audit(self, task_id: int | None, items: list[dict[str, Any]]) -> None:
         if self.storage and task_id and items:
-            self.storage.save_audit_decisions(task_id, items)
+            prepared = []
+            default_platform = self._default_audit_platform()
+            for item in items:
+                normalized = dict(item)
+                normalized.setdefault("run_id", self._active_run_id)
+                normalized.setdefault("run_type", self._active_run_type or "main")
+                normalized.setdefault("platform", default_platform)
+                payload = normalized.get("payload")
+                if isinstance(payload, dict):
+                    payload.setdefault("run_id", normalized.get("run_id"))
+                    payload.setdefault("run_type", normalized.get("run_type"))
+                prepared.append(normalized)
+            self.storage.save_audit_decisions(task_id, prepared)
+
+    def _default_audit_platform(self) -> str:
+        platforms = [str(item) for item in (self._active_platforms or []) if str(item)]
+        if len(platforms) == 1:
+            return platforms[0]
+        if len(platforms) > 1:
+            return "multi"
+        return "xhs"
 
     def _chunks(self, items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
         return [items[index:index + size] for index in range(0, len(items), max(1, size))]
@@ -1238,6 +1370,13 @@ class HarnessPipeline:
         return {
             "demandDescription": settings.get("demandDescription", ""),
             "userConstraints": settings.get("userConstraints", {}),
+            "businessDirection": {
+                "value": settings.get("businessDirection", ""),
+                "label": settings.get("businessDirectionLabel", ""),
+                "description": BUSINESS_DIRECTIONS.get(settings.get("businessDirection", ""), {}).get("description", ""),
+                "keywords": BUSINESS_DIRECTIONS.get(settings.get("businessDirection", ""), {}).get("keywords", []),
+            },
+            "bridgePolicy": self._bridge_policy(settings),
             "geoConstraints": settings.get("geoConstraints", {}),
             "strategySummary": planning.get("strategy_summary") or planning.get("decision") or "",
             "targetCustomerProfile": planning.get("target_customer_profile") or "",
@@ -1246,6 +1385,18 @@ class HarnessPipeline:
             "hypotheses": planning.get("hypotheses") or [],
             "availableProducts": self._product_labels(),
         }
+
+    def _bridge_policy(self, settings: dict[str, Any]) -> dict[str, Any]:
+        direction = str(settings.get("businessDirection") or "")
+        demand = str(settings.get("demandDescription") or "")
+        if direction == "ai_training_bridge" or any(term in demand for term in ("AI培训", "AI 培训", "企业内训", "大模型培训", "智能体培训")):
+            return {
+                "mode": "ai_training_bridge",
+                "rule": "AI 培训只作为需求入口，不承诺正式培训产品；优先桥接到 AI 应用开发、智能体落地或大模型私有化部署。",
+                "keep_signals": ["企业", "公司", "内训", "报名", "怎么联系", "报价", "预算", "方案", "智能体", "落地"],
+                "downrank_signals": ["求职", "待业", "焦虑", "自学", "学习资料", "课程顾问", "培训机构", "师资"],
+            }
+        return {"mode": "none"}
 
     def _lead_audit_item(
         self,
@@ -1443,6 +1594,11 @@ class HarnessPipeline:
             "priority": priority if priority in {"A", "B", "C", "D"} else _priority_from_score(score),
             "stage": decision.get("stage") or "需求观察阶段",
             "confidence": float(decision.get("confidence") or 0.0),
+            "lead_profile": self._lead_profile(decision, comment),
+            "qa_status": "pending",
+            "qa_issues": [],
+            "risk_flags": [],
+            "review_required_reason": "",
             "matched_products": [],
             "recommended_products": "",
             "reason": decision.get("reason") or decision.get("decision") or "",
@@ -1457,6 +1613,93 @@ class HarnessPipeline:
             "outreach_copy": "",
             "source_comment": comment,
         }
+
+    def _lead_profile(self, decision: dict[str, Any], comment: dict[str, Any]) -> str:
+        raw = str(
+            decision.get("lead_profile")
+            or decision.get("leadProfile")
+            or decision.get("customer_profile")
+            or decision.get("customerProfile")
+            or decision.get("buyer_type")
+            or ""
+        ).strip().lower()
+        aliases = {
+            "enterprise": "buyer_enterprise",
+            "business": "buyer_enterprise",
+            "company": "buyer_enterprise",
+            "individual": "buyer_individual_high_intent",
+            "peer": "peer_vendor",
+            "vendor": "peer_vendor",
+            "competitor": "peer_vendor",
+            "personal": "personal_learning",
+            "learner": "personal_learning",
+        }
+        profile = aliases.get(raw, raw)
+        if profile not in {"buyer_enterprise", "buyer_individual_high_intent", "peer_vendor", "personal_learning", "unknown"}:
+            profile = "unknown"
+
+        text = " ".join([
+            str(comment.get("nickname") or ""),
+            str(comment.get("content") or ""),
+            str(decision.get("reason") or ""),
+            str(decision.get("risk") or ""),
+        ])
+        peer_terms = ("企培", "培训机构", "师资", "课程顾问", "产品顾问", "猎头", "招商", "代理")
+        personal_terms = ("待业", "找工作", "求职", "焦虑", "简历", "转行", "自学", "学习资料")
+        buyer_terms = ("报名", "怎么联系", "联系你", "多少钱", "报价", "预算", "企业", "公司", "内训", "采购", "方案")
+        if any(term in text for term in peer_terms) and not any(term in text for term in ("采购", "公司要", "企业要")):
+            return "peer_vendor"
+        if any(term in text for term in personal_terms) and not any(term in text for term in buyer_terms):
+            return "personal_learning"
+        return profile
+
+    def _lead_profile_risk(self, profile: str) -> str:
+        if profile == "peer_vendor":
+            return "疑似同行/中介账号，默认不作为直接销售线索。"
+        if profile == "personal_learning":
+            return "疑似个人学习或求职焦虑流量，缺少企业采购预算。"
+        return ""
+
+    def _apply_qa_status(self, leads: list[dict[str, Any]], qa: dict[str, Any]) -> None:
+        global_approved = bool(qa.get("approved", True))
+        for lead in leads:
+            issues = [item for item in (lead.get("qa_issues") or []) if isinstance(item, dict)]
+            levels = {str(item.get("level") or "").lower() for item in issues}
+            risk_flags = []
+            if lead.get("lead_profile") in {"peer_vendor", "personal_learning"}:
+                risk_flags.append(str(lead.get("lead_profile")))
+            if lead.get("geo_status") in {"needs_city_confirmation", "unknown", "mismatch"}:
+                risk_flags.append(str(lead.get("geo_status")))
+            if issues:
+                risk_flags.extend(sorted(level for level in levels if level))
+
+            if "error" in levels or lead.get("geo_status") == "mismatch":
+                qa_status = "rejected"
+            elif issues or risk_flags or not global_approved:
+                qa_status = "needs_review"
+            else:
+                qa_status = "approved"
+            lead["qa_status"] = qa_status
+            lead["risk_flags"] = sorted(set(risk_flags))
+            lead["review_required_reason"] = self._review_required_reason(lead, issues, global_approved)
+
+    def _review_required_reason(self, lead: dict[str, Any], issues: list[dict[str, Any]], global_approved: bool) -> str:
+        reasons = []
+        if not global_approved:
+            reasons.append("QA 未整体放行")
+        if lead.get("geo_reason"):
+            reasons.append(str(lead.get("geo_reason")))
+        if lead.get("lead_profile") in {"peer_vendor", "personal_learning"}:
+            reasons.append(self._lead_profile_risk(str(lead.get("lead_profile"))))
+        reasons.extend(str(item.get("message") or "") for item in issues if item.get("message"))
+        return "；".join(dict.fromkeys(item for item in reasons if item))
+
+    def _issue_platform(self, issue: dict[str, Any], leads: list[dict[str, Any]]) -> str:
+        target_id = str(issue.get("target_id") or "")
+        for lead in leads:
+            if target_id and target_id == str(lead.get("lead_id")):
+                return str(lead.get("platform") or "xhs")
+        return self._default_audit_platform()
 
     def _comment_brief(self, comment: dict[str, Any], note: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
         platform = str(comment.get("platform") or note.get("platform") or "xhs")

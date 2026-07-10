@@ -4,6 +4,8 @@ from typing import Any
 
 from .agents import DEFAULT_AGENT_SPECS, AgentSpec, agent_specs
 
+PROMPT_ITERATION_START = "V0.1"
+
 
 class PromptRegistry:
     def __init__(self, storage: Any | None = None) -> None:
@@ -22,6 +24,7 @@ class PromptRegistry:
                 status="active",
                 score=0.82,
                 notes="Built-in Harness prompt.",
+                iteration_version=PROMPT_ITERATION_START,
             )
             if active and active.get("version") != spec.version and active.get("notes") == "Built-in Harness prompt.":
                 self.storage.promote_prompt_version(prompt_id)
@@ -36,6 +39,7 @@ class PromptRegistry:
             "agentKey": spec.key,
             "agentName": spec.name,
             "version": spec.version,
+            "iterationVersion": PROMPT_ITERATION_START,
             "prompt": spec.system_prompt,
             "status": "active",
             "score": 0.82,
@@ -47,21 +51,27 @@ class PromptRegistry:
         return DEFAULT_AGENT_SPECS[agent_key]
 
     def agents_payload(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "key": spec.key,
-                "name": spec.name,
-                "version": self.active_prompt(spec.key).get("version", spec.version),
-                "role": spec.role,
-                "requiredKeys": list(spec.required_keys),
-            }
-            for spec in agent_specs()
-        ]
+        payload: list[dict[str, Any]] = []
+        for spec in agent_specs():
+            active = self.active_prompt(spec.key)
+            payload.append(
+                {
+                    "key": spec.key,
+                    "name": spec.name,
+                    "version": active.get("iterationVersion") or PROMPT_ITERATION_START,
+                    "iterationVersion": active.get("iterationVersion") or PROMPT_ITERATION_START,
+                    "promptVersion": active.get("version", spec.version),
+                    "role": spec.role,
+                    "requiredKeys": list(spec.required_keys),
+                }
+            )
+        return payload
 
-    def prompt_versions(self) -> list[dict[str, Any]]:
+    def prompt_versions(self, agent_key: str | None = None) -> list[dict[str, Any]]:
         if not self.storage:
-            return [self.active_prompt(spec.key) for spec in agent_specs()]
-        return self.storage.list_prompt_versions()
+            prompts = [self.active_prompt(spec.key) for spec in agent_specs()]
+            return [prompt for prompt in prompts if not agent_key or prompt.get("agentKey") == agent_key]
+        return self.storage.list_prompt_versions(agent_key=agent_key)
 
     def promote(self, prompt_id: int) -> dict[str, Any]:
         if not self.storage:

@@ -485,8 +485,6 @@
         </div>
         <span class="pill">任务输入</span>
       </div>
-      <input id="businessDirection" type="hidden" value="cloud_ai" />
-
       <div class="config-grid">
         <div>
           <label for="demandDescription">需求描述 <span class="field-required">*</span></label>
@@ -519,6 +517,12 @@
               <input id="minScore" type="number" min="0" max="100" value="60" />
             </div>
           </div>
+
+          <label for="businessDirection">产品/服务匹配范围</label>
+          <select id="businessDirection">
+            <option value="cloud_ai">开放需求获客（默认）</option>
+          </select>
+          <div id="businessDirectionHelp" class="field-help">影响 Agent 的产品匹配倾向；具体是否保留仍以需求描述、公开证据和 QA 为准。</div>
 
           <label>采集平台</label>
           <div class="row">
@@ -716,6 +720,29 @@
         .join('');
     }
 
+    function businessDirectionOptions(selected) {
+      const options = workbenchConfig?.businessDirections || [];
+      const current = selected || workbenchConfig?.defaultBusinessDirection || workbenchConfig?.sales?.default_business_direction || 'cloud_ai';
+      return options.map(item => `<option value="${esc(item.value)}" ${item.value === current ? 'selected' : ''}>${esc(item.label)}</option>`).join('');
+    }
+
+    function updateBusinessDirectionHelp() {
+      const current = $('businessDirection')?.value || 'cloud_ai';
+      const item = (workbenchConfig?.businessDirections || []).find(option => option.value === current);
+      const keywords = (item?.keywords || []).slice(0, 5).join(' / ');
+      const text = [item?.description || '影响 Agent 的产品匹配倾向；具体是否保留仍以需求描述、公开证据和 QA 为准。', keywords ? `参考词：${keywords}` : ''].filter(Boolean).join(' ');
+      if ($('businessDirectionHelp')) $('businessDirectionHelp').textContent = text;
+    }
+
+    function qaStatusLabel(status) {
+      return {
+        approved: 'QA 可触达',
+        needs_review: 'QA 需复审',
+        rejected: 'QA 已拒绝',
+        pending: 'QA 待检查'
+      }[status || ''] || 'QA 未标记';
+    }
+
     function renderEventList(events) {
       return (events || []).length
         ? events.map(e => `
@@ -854,6 +881,7 @@
         return alert(`${label}手动关注功能未开启。请先在 Harness 控制台系统设置中开启对应平台关注。`);
       }
       if (!hasFollowTarget(lead)) return alert(`该线索没有可用的${label}用户 ID，无法关注。`);
+      if (lead.qa_status === 'rejected') return alert('该线索已被 QA 拒绝，不能执行触达动作。');
       const accountText = platform === 'douyin' ? await getCurrentDouyinUserText() : await getCurrentXhsUserText();
       const visibleUserId = lead.user_id || leadTargetUserId(lead) || '-';
       const ok = confirm(
@@ -863,9 +891,10 @@
           `当前登录账号：${accountText}`,
           `目标对象：${lead.nickname || '未知用户'}（${visibleUserId}）`,
           `来源线索：${lead.demand_summary || lead.evidence || lead.lead_id || '-'}`,
+          lead.qa_status === 'needs_review' ? `复审提示：${lead.review_required_reason || '该线索需要人工复核后再触达。'}` : '',
           '',
           '该动作只会关注这一条线索对象，不会批量关注，也不会自动发送其他消息。'
-        ].join('\n')
+        ].filter(line => line !== '').join('\n')
       );
       if (!ok) return;
       const statusEl = $(`outreachStatus-${index}`);
@@ -893,6 +922,7 @@
     function openDmDraft(index) {
       const lead = cachedData?.leads?.leads?.[index];
       if (!lead) return alert('找不到该线索数据');
+      if (lead.qa_status === 'rejected') return alert('该线索已被 QA 拒绝，不能生成触达动作。');
       currentDraftLeadIndex = index;
       const platform = leadPlatform(lead);
       const label = platformLabel(platform);
@@ -953,6 +983,7 @@
       const lead = cachedData?.leads?.leads?.[currentDraftLeadIndex];
       if (!lead) return alert('找不到该线索数据');
       if (!canSendDouyinDm(lead)) return alert('抖音私信发送未开启，或该线索缺少可用抖音用户 ID。');
+      if (lead.qa_status === 'rejected') return alert('该线索已被 QA 拒绝，不能发送私信。');
       const text = $('dmDraftText').value.trim();
       if (!text) return alert('私信内容不能为空。');
       const ok = confirm([
@@ -961,8 +992,10 @@
         `目标对象：${lead.nickname || '未知用户'}（${lead.user_id || leadTargetUserId(lead) || '-'}）`,
         `消息内容：${text}`,
         '',
+        lead.qa_status === 'needs_review' ? `复审提示：${lead.review_required_reason || '该线索需要人工复核后再触达。'}` : '',
+        '',
         '该动作只会发送这一条私信，不会批量发送。'
-      ].join('\n'));
+      ].filter(line => line !== '').join('\n'));
       if (!ok) return;
       $('dmDraftStatus').textContent = '正在发送抖音私信...';
       $('dmDraftStatus').style.color = 'var(--muted)';
@@ -1151,11 +1184,15 @@
         const followEnabled = platformFollowEnabled(l);
         const followTargetAvailable = hasFollowTarget(l);
         const followLabel = followEnabled ? (followTargetAvailable ? '关注' : '无用户ID') : '关注未开启';
-        const followDisabled = !followEnabled || !followTargetAvailable ? 'disabled' : '';
+        const qaStatus = l.qa_status || 'pending';
+        const qaBlocksAction = qaStatus === 'rejected';
+        const followDisabled = !followEnabled || !followTargetAvailable || qaBlocksAction ? 'disabled' : '';
+        const dmDisabled = qaBlocksAction ? 'disabled' : '';
         const dmLabel = platform === 'douyin' && workbenchConfig?.douyin?.enable_dm_actions ? '抖音私信' : '私信草稿';
         const outreachHint = platform === 'douyin'
           ? (workbenchConfig?.douyin?.enable_dm_actions ? '关注和私信均需逐条人工确认。' : '关注需逐条确认；抖音私信发送未开启。')
           : (followEnabled ? '触达动作需逐条人工确认；私信只生成草稿。' : '关注功能默认关闭；私信只生成草稿。');
+        const reviewReason = l.review_required_reason || (l.qa_issues || []).map(issue => issue.message).filter(Boolean).join('；');
         return `
           <article class="lead-card">
             <div class="lead-card-head">
@@ -1168,6 +1205,7 @@
                 <div class="lead-meta">
                   <span>${esc(platformName)}</span>
                   <span>${esc(leadTypeLabel)}</span>
+                  <span>${esc(qaStatusLabel(qaStatus))}</span>
                   <span>${esc(l.nickname || '未知用户')}</span>
                   <span>ID: ${esc(l.user_id || '-')}</span>
                   ${l.ip ? `<span>${esc(l.ip)}</span>` : ''}
@@ -1192,12 +1230,12 @@
               </div>
               <div class="lead-block">
                 <b>风险提示</b>
-                <div class="small">${esc([l.risk, l.geo_reason].filter(Boolean).join('；') || '跟进前需人工核验语境。')}</div>
+                <div class="small">${esc([l.risk, l.geo_reason, reviewReason].filter(Boolean).join('；') || '跟进前需人工核验语境。')}</div>
               </div>
             </div>
             <div class="touch-actions">
               <button type="button" class="btn-follow" ${followDisabled} onclick="confirmFollowLead(${idx})">${esc(followLabel)}</button>
-              <button type="button" class="btn-draft" onclick="openDmDraft(${idx})">${esc(dmLabel)}</button>
+              <button type="button" class="btn-draft" ${dmDisabled} onclick="openDmDraft(${idx})">${esc(dmLabel)}</button>
               <div id="outreachStatus-${idx}" class="small outreach-status">${esc(outreachHint)}</div>
             </div>
             <div class="lead-actions feedback-cell">
@@ -1217,6 +1255,7 @@
       const actions = (report.recommended_actions || []).map(x => `<li>${esc(x)}</li>`).join('');
       const risks = (report.risks || []).map(x => `<li>${esc(x)}</li>`).join('');
       const distRows = (data.leads?.productDistribution || report.productDistribution || []).map(p => `<li>${esc(p.label)}：${fmt(p.count)} 条</li>`).join('');
+      const directionLabel = data.businessDirectionLabel || (workbenchConfig?.businessDirections || []).find(item => item.value === data.businessDirection)?.label || data.businessDirection || '未标记';
 
       $('output').className = 'card result-shell';
       $('output').innerHTML = `
@@ -1227,6 +1266,7 @@
           <div class="kpi"><b style="color:var(--red)">${fmt(aLeads)}</b><span>A级线索</span></div>
           <div class="kpi"><b>${fmt(productCount)}</b><span>产品方向</span></div>
         </div>
+        <div class="small">本次产品/服务匹配范围：${esc(directionLabel)}</div>
         <div class="tabs" role="tablist" aria-label="结果 tabs">
           <button type="button" class="tab-btn active" data-result-tab="leads" onclick="switchResultTab('leads')">线索</button>
           <button type="button" class="tab-btn" data-result-tab="report" onclick="switchResultTab('report')">日报</button>
@@ -1443,6 +1483,7 @@
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(leads.map(l => ({
         线索类型: l.lead_type === 'note_author' ? '笔记作者' : '评论线索',
         地域状态: geoStatusLabel(l.geo_status), 地域说明: l.geo_reason,
+        QA状态: qaStatusLabel(l.qa_status), 复审原因: l.review_required_reason,
         评分: l.score, 优先级: l.priority, 阶段: l.stage, 昵称: l.nickname, 用户ID: l.user_id,
         原文证据: l.evidence, 需求摘要: l.demand_summary, 推荐产品: l.recommended_products,
         跟进话术: l.outreach_copy, 风险提示: l.risk, 来源笔记: l.note_title, 来源链接: l.note_url, 反馈: l.feedback
@@ -1472,7 +1513,7 @@
         report.summary || '',
         '',
         '## Top 线索',
-        ...leads.slice(0, 10).map((l, i) => `${i + 1}. [${l.priority}/${l.score}] ${l.demand_summary}\\n   - 类型：${l.lead_type === 'note_author' ? '笔记作者' : '评论线索'}\\n   - 地域：${geoStatusLabel(l.geo_status) || '未标记'}${l.geo_reason ? `，${l.geo_reason}` : ''}\\n   - 证据：${l.evidence}\\n   - 产品：${l.recommended_products}\\n   - 话术：${l.outreach_copy}\\n   - 来源：${l.note_url}`),
+        ...leads.slice(0, 10).map((l, i) => `${i + 1}. [${l.priority}/${l.score}] ${l.demand_summary}\\n   - 类型：${l.lead_type === 'note_author' ? '笔记作者' : '评论线索'}\\n   - QA：${qaStatusLabel(l.qa_status)}${l.review_required_reason ? `，${l.review_required_reason}` : ''}\\n   - 地域：${geoStatusLabel(l.geo_status) || '未标记'}${l.geo_reason ? `，${l.geo_reason}` : ''}\\n   - 证据：${l.evidence}\\n   - 产品：${l.recommended_products}\\n   - 话术：${l.outreach_copy}\\n   - 来源：${l.note_url}`),
         '',
         '## 风险提示',
         ...((report.risks || ['销售跟进前需人工核验语境。']).map(x => `- ${x}`))
@@ -1494,8 +1535,12 @@
         const enabled = workbenchConfig?.platforms?.enabled || ['xhs'];
         if ($('platformXhs')) $('platformXhs').checked = enabled.includes('xhs');
         if ($('platformDouyin')) $('platformDouyin').checked = enabled.includes('douyin');
-        const firstDirection = json.data?.businessDirections?.[0]?.value;
-        if (firstDirection && !$('businessDirection').value) $('businessDirection').value = firstDirection;
+        if ($('businessDirection')) {
+          $('businessDirection').innerHTML = businessDirectionOptions($('businessDirection').value);
+          $('businessDirection').value = $('businessDirection').value || workbenchConfig?.defaultBusinessDirection || 'cloud_ai';
+          $('businessDirection').onchange = updateBusinessDirectionHelp;
+          updateBusinessDirectionHelp();
+        }
       } catch {}
     }
 

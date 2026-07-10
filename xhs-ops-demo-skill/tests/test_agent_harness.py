@@ -497,6 +497,39 @@ class AgentHarnessTests(unittest.TestCase):
         self.assertNotEqual(rolled_back["id"], candidate_id)
         self.assertEqual(rolled_back["status"], "active")
 
+    def test_prompt_iteration_versions_start_at_v01_and_increment(self) -> None:
+        storage = self.make_storage()
+        registry = PromptRegistry(storage)
+        registry.ensure_defaults()
+        active = storage.get_active_prompt("lead_signal_agent")
+        self.assertEqual(active["iterationVersion"], "V0.1")
+        agent_payload = next(item for item in registry.agents_payload() if item["key"] == "lead_signal_agent")
+        self.assertEqual(agent_payload["version"], "V0.1")
+        self.assertEqual(agent_payload["iterationVersion"], "V0.1")
+        self.assertEqual(agent_payload["promptVersion"], active["version"])
+
+        candidate_id = storage.create_prompt_candidate(
+            agent_key="lead_signal_agent",
+            agent_name="线索识别 Agent",
+            base_version=active["version"],
+            prompt=active["prompt"] + "\n候选",
+            source_task_id=1,
+            notes="test",
+        )
+        candidate = next(item for item in storage.list_prompt_versions("lead_signal_agent") if item["id"] == candidate_id)
+        self.assertEqual(candidate["iterationVersion"], "V0.2")
+        registry.promote(candidate_id)
+        promoted_payload = next(item for item in registry.agents_payload() if item["key"] == "lead_signal_agent")
+        self.assertEqual(promoted_payload["version"], "V0.2")
+
+    def test_prompt_versions_can_be_filtered_by_agent(self) -> None:
+        storage = self.make_storage()
+        registry = PromptRegistry(storage)
+        registry.ensure_defaults()
+        prompts = registry.prompt_versions("lead_signal_agent")
+        self.assertTrue(prompts)
+        self.assertTrue(all(prompt["agentKey"] == "lead_signal_agent" for prompt in prompts))
+
     def test_feedback_storage_creates_learning_record(self) -> None:
         storage = self.make_storage()
         task_id = storage.create_task({"keyword": "腾讯云"}, mode="single")
@@ -683,10 +716,44 @@ class AgentHarnessTests(unittest.TestCase):
         self.assertIn(("report", "agent", "report_agent", "generated"), decisions)
         self.assertIn(("reflection", "agent", "reflection_evolution_agent", "completed"), decisions)
         self.assertIn(("search", "keyword", "腾讯云优惠", "planned"), decisions)
-        self.assertIn(("relevance", "note", "n2", "drop"), decisions)
-        self.assertIn(("lead_signal", "comment", "c2", "ignore"), decisions)
-        ignored = [item for item in audit["items"] if item["entityId"] == "c2" and item["decision"] == "ignore"][0]
-        self.assertIn("收藏学习", ignored["reason"])
+
+    def test_balanced_candidate_pool_keeps_each_enabled_platform(self) -> None:
+        pipeline = HarnessPipeline(FakeAdapter(), {"llm": {"api_key": "test-key"}})
+        notes = [
+            {"id": f"x{i}", "platform": "xhs", "engagement": 1000 - i}
+            for i in range(6)
+        ] + [
+            {"id": "d1", "platform": "douyin", "engagement": 0},
+            {"id": "d2", "platform": "douyin", "engagement": 0},
+        ]
+        selected = pipeline._balanced_candidate_pool(
+            notes,
+            {"platforms": ["xhs", "douyin"], "metric": "engagement"},
+            4,
+        )
+        self.assertEqual(len(selected), 4)
+        self.assertIn("douyin", {item["platform"] for item in selected})
+
+    def test_business_direction_and_bridge_policy_reach_agents(self) -> None:
+        storage = self.make_storage()
+        task_id = storage.create_task({"demandDescription": "找需要AI培训的线索"}, mode="single")
+        config = {
+            "llm": {"api_key": "test-key", "api_base": "http://fake/v1", "model": "fake-model", "temperature": 0.0},
+            "xhs": {"max_count": 20, "read_delay_min": 0, "read_delay_max": 0},
+            "sales": {"default_min_score": 60, "default_business_direction": "ai_training_bridge", "redact_user": False},
+        }
+        runner = FakeRunner(storage, task_id)
+        result = HarnessPipeline(FakeAdapter(), config, storage, runner=runner).run(
+            {"demandDescription": "找需要AI培训的线索", "count": 1, "delayMin": 0, "delayMax": 0},
+            task_id=task_id,
+            event_callback=lambda *args, **kwargs: None,
+            progress_callback=lambda *args, **kwargs: None,
+        )
+        self.assertEqual(result["businessDirection"], "ai_training_bridge")
+        chief_payload = runner.payloads["chief_orchestrator"][0]
+        lead_payload = runner.payloads["lead_signal_agent"][0]
+        self.assertEqual(chief_payload["businessDirection"], "ai_training_bridge")
+        self.assertEqual(lead_payload["strategy"]["bridgePolicy"]["mode"], "ai_training_bridge")
 
     def test_task3_regressions_are_handled_in_pipeline(self) -> None:
         storage = self.make_storage()

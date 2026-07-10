@@ -10,7 +10,7 @@ from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import config_loader
 from agent_harness import HarnessPipeline
@@ -532,6 +532,7 @@ def public_runtime_config() -> dict[str, Any]:
     xhs = CONFIG.get("xhs") or {}
     douyin = CONFIG.get("douyin") or {}
     platforms = CONFIG.get("platforms") or {}
+    sales = CONFIG.get("sales") or {}
     data["xhs"] = {
         "enable_follow_actions": bool(xhs.get("enable_follow_actions", False)),
     }
@@ -542,6 +543,10 @@ def public_runtime_config() -> dict[str, Any]:
     data["platforms"] = {
         "enabled": config_loader.enabled_platforms(platforms.get("enabled")),
     }
+    data["sales"] = {
+        "default_business_direction": str(sales.get("default_business_direction") or "cloud_ai"),
+    }
+    data["defaultBusinessDirection"] = data["sales"]["default_business_direction"]
     return data
 
 
@@ -802,7 +807,9 @@ class Handler(SimpleHTTPRequestHandler):
             self.respond_json({"ok": True, "data": {"agents": get_registry().agents_payload()}})
             return
         if path == "/api/prompts":
-            self.respond_json({"ok": True, "data": {"prompts": get_registry().prompt_versions(), "summary": STORAGE.prompt_version_summary()}})
+            params = parse_qs(parsed.query)
+            agent_key = str((params.get("agentKey") or params.get("agent_key") or [""])[0]).strip()
+            self.respond_json({"ok": True, "data": {"prompts": get_registry().prompt_versions(agent_key or None), "summary": STORAGE.prompt_version_summary()}})
             return
         if path == "/api/feedback/list":
             params = dict(item.split("=", 1) for item in parsed.query.split("&") if "=" in item) if parsed.query else {}
@@ -900,6 +907,9 @@ class Handler(SimpleHTTPRequestHandler):
                     entity_type=str(payload.get("entityType") or payload.get("entity_type") or "").strip(),
                     decision=str(payload.get("decision") or "").strip(),
                     keyword=str(payload.get("keyword") or "").strip(),
+                    platform=str(payload.get("platform") or "").strip(),
+                    run_id=str(payload.get("runId") or payload.get("run_id") or "").strip(),
+                    run_type=str(payload.get("runType") or payload.get("run_type") or "").strip(),
                     limit=clamp_int(payload.get("limit"), 100, 1, 200),
                     offset=clamp_int(payload.get("offset"), 0, 0, 1000000),
                 )

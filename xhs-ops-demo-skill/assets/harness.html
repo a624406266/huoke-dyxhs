@@ -135,12 +135,16 @@
     .list { display: grid; gap: 10px; }
     .item { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #fbfbfa; }
     .item-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 6px; }
-    .trace-output, .feedback-output, .audit-output {
+    .trace-output, .feedback-output, .audit-output, .prompt-output {
       max-height: 150px; overflow: auto; padding: 10px; border-radius: 8px; background: white;
       border: 1px solid var(--line); white-space: pre-wrap; font-size: 12px; color: #383838;
     }
     .feedback-output { max-height: 160px; }
     .audit-output { max-height: 190px; }
+    .prompt-output { max-height: 340px; }
+    .prompt-modal { width: min(920px, 100%); }
+    .prompt-modal .modal-body { max-height: min(72vh, 760px); overflow: auto; }
+    .prompt-list { display: grid; gap: 12px; }
     .audit-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .audit-evidence { margin-top: 8px; color: #383838; }
     .audit-raw { margin-top: 10px; }
@@ -320,7 +324,7 @@
       border-radius: 8px;
       background: var(--surface-soft);
     }
-    .trace-output, .feedback-output, .audit-output {
+    .trace-output, .feedback-output, .audit-output, .prompt-output {
       background: #ffffff;
       border-color: #dce5e1;
     }
@@ -523,6 +527,23 @@
               <input id="auditKeyword" placeholder="全部" />
             </div>
             <div>
+              <label for="auditPlatform">平台</label>
+              <select id="auditPlatform">
+                <option value="">全部</option>
+                <option value="multi">多平台/任务级</option>
+                <option value="xhs">小红书</option>
+                <option value="douyin">抖音</option>
+              </select>
+            </div>
+            <div>
+              <label for="auditRunType">运行批次</label>
+              <select id="auditRunType">
+                <option value="">全部</option>
+                <option value="main">主任务</option>
+                <option value="repair">补跑/修复</option>
+              </select>
+            </div>
+            <div>
               <label for="auditOffset">起始位置</label>
               <input id="auditOffset" type="number" min="0" value="0" />
             </div>
@@ -604,6 +625,12 @@
             <label class="checks"><input id="settingPlatformDouyin" type="checkbox" />抖音</label>
           </div>
 
+          <label for="settingBusinessDirection">默认产品/服务匹配范围</label>
+          <select id="settingBusinessDirection">
+            <option value="cloud_ai">开放需求获客（默认）</option>
+          </select>
+          <div id="settingBusinessDirectionHelp" class="field-help">新任务未显式选择时使用该默认范围；它影响 Agent 匹配倾向，不是唯一硬过滤。</div>
+
           <label for="settingOpencliBin">OpenCLI 路径</label>
           <input id="settingOpencliBin" placeholder="可留空使用 PATH 中的 opencli" />
 
@@ -636,6 +663,21 @@
     </section>
   </main>
 
+  <div id="promptModalMask" class="modal-mask" onclick="closeAgentPromptModal()">
+    <div class="modal prompt-modal" role="dialog" aria-modal="true" aria-labelledby="promptModalTitle" onclick="event.stopPropagation()">
+      <div class="modal-head">
+        <h2 id="promptModalTitle">Agent 提示词</h2>
+        <button onclick="closeAgentPromptModal()">关闭</button>
+      </div>
+      <div id="promptModalBody" class="modal-body">
+        <div class="small">正在读取提示词...</div>
+      </div>
+      <div class="modal-actions">
+        <button onclick="closeAgentPromptModal()">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const $ = (id) => document.getElementById(id);
     function displayText(value) {
@@ -656,6 +698,7 @@
     if (activePage === 'sales') activePage = 'overview';
     let adminSetupMode = false;
     let settingsLoaded = false;
+    let settingsConfig = {};
     const auditState = { offset: 0, limit: 100, total: 0, hasMore: false, loaded: false, loading: false };
     const busyFeedback = new Set();
     function wireButtonFeedback() {
@@ -692,6 +735,20 @@
       feedback: ['反馈学习', '分析人工反馈并应用到运行时 Prompt/Skill。'],
       settings: ['系统设置', '配置模型、中转站、XHS 路径和工作台展示策略。']
     };
+
+    function businessDirectionOptions(selected) {
+      const options = settingsConfig.businessDirections || [];
+      const current = selected || settingsConfig.sales?.default_business_direction || settingsConfig.defaultBusinessDirection || 'cloud_ai';
+      return options.map(item => `<option value="${esc(item.value)}" ${item.value === current ? 'selected' : ''}>${esc(item.label)}</option>`).join('');
+    }
+
+    function updateSettingBusinessDirectionHelp() {
+      const current = $('settingBusinessDirection')?.value || 'cloud_ai';
+      const item = (settingsConfig.businessDirections || []).find(option => option.value === current);
+      const keywords = (item?.keywords || []).slice(0, 5).join(' / ');
+      const text = [item?.description || '新任务未显式选择时使用该默认范围；它影响 Agent 匹配倾向，不是唯一硬过滤。', keywords ? `参考词：${keywords}` : ''].filter(Boolean).join(' ');
+      if ($('settingBusinessDirectionHelp')) $('settingBusinessDirectionHelp').textContent = text;
+    }
     const AGENT_DISPLAY_NAMES = {
       chief_orchestrator: '总控编排 Agent',
       planning_agent: '搜索规划 Agent',
@@ -1020,6 +1077,10 @@
       return mappedLabel(AGENT_DISPLAY_NAMES, value, 'Agent');
     }
 
+    function platformLabel(platform) {
+      return { xhs: '小红书', douyin: '抖音', multi: '多平台' }[platform] || platform || '未知平台';
+    }
+
     function purposeLabel(value) {
       return mappedLabel(PURPOSE_DISPLAY_NAMES, value, '');
     }
@@ -1052,6 +1113,16 @@
       if (status === 'active') return '禁用并回滚';
       if (status === 'candidate') return '禁用候选';
       return '禁用版本';
+    }
+
+    function promptIterationLabel(prompt) {
+      return prompt?.iterationVersion || prompt?.version || 'V0.1';
+    }
+
+    function promptInternalVersion(prompt) {
+      const internal = prompt?.promptVersion || prompt?.version || '';
+      const iteration = prompt?.iterationVersion || '';
+      return internal && internal !== iteration ? internal : '';
     }
 
     function textBlock(value, limit = 900) {
@@ -1163,9 +1234,13 @@
         <div class="item">
           <div class="item-head">
             <b>${esc(agentLabel(agent.key || agent.name))}</b>
-            <span class="pill">${esc(agent.version)}</span>
+            <span class="pill">${esc(promptIterationLabel(agent))}</span>
           </div>
           <div class="small">${esc(agent.role)}</div>
+          <div class="small">内部版本：${esc(promptInternalVersion(agent) || agent.version || '-')}</div>
+          <div class="btn-row">
+            <button data-agent-key="${esc(agent.key || '')}" onclick="showAgentPromptsFromButton(this)">查看提示词</button>
+          </div>
         </div>
       `).join('') || '<div class="small">暂无 Agent</div>';
     }
@@ -1199,11 +1274,15 @@
       const entityType = $('auditEntityType').value.trim();
       const decision = $('auditDecision').value.trim();
       const keyword = $('auditKeyword').value.trim();
+      const platform = $('auditPlatform')?.value.trim();
+      const runType = $('auditRunType')?.value.trim();
       if (taskId) body.taskId = /^\d+$/.test(taskId) ? Number(taskId) : taskId;
       if (stage) body.stage = stage;
       if (entityType) body.entityType = entityType;
       if (decision) body.decision = decision;
       if (keyword) body.keyword = keyword;
+      if (platform) body.platform = platform;
+      if (runType) body.runType = runType;
       return body;
     }
 
@@ -1247,6 +1326,8 @@
         const evidence = readableText(item.evidence ?? item.evidence_json ?? item.evidenceJson ?? '');
         const risk = readableText(item.risk ?? '');
         const keyword = item.sourceKeyword ?? item.source_keyword ?? item.keyword ?? item.query ?? '';
+        const platform = item.platform ? ` · 平台：${esc(platformLabel(item.platform))}` : '';
+        const runText = item.runType ? ` · 批次：${esc(item.runType)}${item.runId ? '/' + esc(item.runId) : ''}` : '';
         const createdAt = item.createdAt ?? item.created_at ?? item.time ?? item.timestamp;
         const meta = auditMetaHtml(item);
         return `
@@ -1254,7 +1335,7 @@
             <div class="item-head">
               <div>
                 <b>${esc(agent)} <span class="mono">#${esc(taskId)}</span></b>
-                <div class="small">${esc(stageLabel(stage))} · ${esc(entityTypeLabel(entityType))}:${esc(entityId)}${keyword ? ` · 关键词：${esc(keyword)}` : ''} · ${formatAnyTime(createdAt)}</div>
+                <div class="small">${esc(stageLabel(stage))} · ${esc(entityTypeLabel(entityType))}:${esc(entityId)}${platform}${runText}${keyword ? ` · 关键词：${esc(keyword)}` : ''} · ${formatAnyTime(createdAt)}</div>
               </div>
               <span class="pill ${safeClass(decision)}">${esc(decisionLabel(decision))}</span>
             </div>
@@ -1330,7 +1411,7 @@
     }
 
     function resetAuditFilters() {
-      ['auditTaskId', 'auditStage', 'auditEntityType', 'auditDecision', 'auditKeyword'].forEach(id => $(id).value = '');
+      ['auditTaskId', 'auditStage', 'auditEntityType', 'auditDecision', 'auditKeyword', 'auditPlatform', 'auditRunType'].forEach(id => $(id).value = '');
       $('auditOffset').value = '0';
       $('auditLimit').value = '100';
       auditState.offset = 0;
@@ -1365,7 +1446,7 @@
             <b>${esc(agentLabel(run.agentKey || run.agentName))}</b>
             <span class="pill">${Math.round(Number(run.confidence || 0) * 100)}%</span>
           </div>
-          <div class="small">${esc(purposeLabel(run.purpose))} · ${esc(run.promptVersion || '')} · ${fmt(run.durationMs)}ms · ${formatTime(run.createdAt)}</div>
+          <div class="small">${esc(purposeLabel(run.purpose))} · ${esc(run.promptVersion || '')} · 批次：${esc(run.runType || 'main')}${run.runId ? '/' + esc(run.runId) : ''} · ${fmt(run.durationMs)}ms · ${formatTime(run.createdAt)}</div>
           ${run.error ? `<div class="small" style="color:var(--red);">${esc(run.error)}</div>` : ''}
           <div class="trace-output">${textBlock(run.outputSummary)}</div>
         </div>
@@ -1401,17 +1482,72 @@
       $('prompts').innerHTML = prompts.length ? prompts.map(prompt => `
         <div class="item">
           <div class="item-head">
-            <b>${esc(agentLabel(prompt.agentKey || prompt.agentName))} · ${esc(prompt.version)}</b>
+            <b>${esc(agentLabel(prompt.agentKey || prompt.agentName))} · ${esc(promptIterationLabel(prompt))}</b>
             <span class="pill ${esc(prompt.status)}">${esc(promptStatusLabel(prompt.status))}</span>
           </div>
-          <div class="small">评分 ${Number(prompt.score || 0).toFixed(2)} · ${esc(prompt.notes || '')}</div>
+          <div class="small">内部版本：${esc(prompt.version || '-')} · 评分 ${Number(prompt.score || 0).toFixed(2)} · ${esc(prompt.notes || '')}</div>
           <div class="small">来源任务：${prompt.sourceTaskId || '-'}</div>
           <div class="btn-row">
+            ${prompt.status === 'active' ? `<button data-agent-key="${esc(prompt.agentKey || '')}" onclick="showAgentPromptsFromButton(this)">查看该 Agent 全部提示词</button>` : ''}
             ${prompt.status !== 'active' && prompt.status !== 'disabled' ? `<button class="primary" onclick="promotePrompt(${Number(prompt.id)})">设为当前版本</button>` : ''}
             ${prompt.status !== 'disabled' ? `<button class="danger" onclick="disablePrompt(${Number(prompt.id)})">${disableLabel(prompt.status)}</button>` : ''}
           </div>
         </div>
       `).join('') : '<div class="small">暂无提示词版本</div>';
+    }
+
+    function showAgentPromptsFromButton(button) {
+      const agentKey = button?.dataset?.agentKey || '';
+      showAgentPrompts(agentKey);
+    }
+
+    async function showAgentPrompts(agentKey) {
+      if (!agentKey) return alert('找不到 Agent key');
+      $('promptModalTitle').textContent = `${agentLabel(agentKey)} 的提示词`;
+      $('promptModalBody').innerHTML = '<div class="small">正在读取提示词...</div>';
+      $('promptModalMask').style.display = 'flex';
+      try {
+        const data = await get(`/api/prompts?agentKey=${encodeURIComponent(agentKey)}`);
+        renderAgentPromptModal(agentKey, data.prompts || []);
+      } catch (err) {
+        $('promptModalBody').innerHTML = `<div class="small" style="color:var(--red);">读取失败：${esc(err.message || err)}</div>`;
+      }
+    }
+
+    function renderAgentPromptModal(agentKey, prompts) {
+      if (!prompts.length) {
+        $('promptModalBody').innerHTML = `<div class="small">暂无 ${esc(agentLabel(agentKey))} 的提示词版本。</div>`;
+        return;
+      }
+      $('promptModalBody').innerHTML = `
+        <div class="prompt-list">
+          ${prompts.map(prompt => {
+            const internal = prompt.version || '-';
+            const iteration = promptIterationLabel(prompt);
+            const open = prompt.status === 'active' ? ' open' : '';
+            return `
+              <div class="item">
+                <div class="item-head">
+                  <div>
+                    <b>${esc(iteration)} · ${esc(promptStatusLabel(prompt.status))}</b>
+                    <div class="small">内部版本：${esc(internal)} · 评分 ${Number(prompt.score || 0).toFixed(2)} · 来源任务：${prompt.sourceTaskId || '-'}</div>
+                  </div>
+                  <span class="pill ${esc(prompt.status)}">${esc(promptStatusLabel(prompt.status))}</span>
+                </div>
+                ${prompt.notes ? `<div class="small">说明：${esc(prompt.notes)}</div>` : ''}
+                <details${open}>
+                  <summary>提示词全文</summary>
+                  <div class="prompt-output">${textBlock(prompt.prompt || '', 24000)}</div>
+                </details>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+
+    function closeAgentPromptModal() {
+      $('promptModalMask').style.display = 'none';
     }
 
     function renderFeedback(items) {
@@ -1526,6 +1662,7 @@
       if (settingsLoaded && !force) return;
       try {
         const s = await get('/api/settings');
+        settingsConfig = s || {};
         $('settingApiBase').value = s.llm?.api_base || '';
         $('settingModel').value = s.llm?.model || '';
         $('settingTemperature').value = s.llm?.temperature ?? 0.6;
@@ -1537,6 +1674,12 @@
         const enabledPlatforms = s.platforms?.enabled || ['xhs'];
         $('settingPlatformXhs').checked = enabledPlatforms.includes('xhs');
         $('settingPlatformDouyin').checked = enabledPlatforms.includes('douyin');
+        if ($('settingBusinessDirection')) {
+          $('settingBusinessDirection').innerHTML = businessDirectionOptions(s.sales?.default_business_direction || 'cloud_ai');
+          $('settingBusinessDirection').value = s.sales?.default_business_direction || 'cloud_ai';
+          $('settingBusinessDirection').onchange = updateSettingBusinessDirectionHelp;
+          updateSettingBusinessDirectionHelp();
+        }
         $('settingOpencliBin').value = s.opencli?.bin || '';
         $('settingSocialDataxEnv').value = s.socialdatax?.api_key_env || 'SOCIALDATAX_API_KEY';
         $('socialDataxHelp').textContent = s.socialdatax?.has_api_key
@@ -1598,7 +1741,8 @@
             enable_dm_actions: $('settingDouyinDmActions').checked
           },
           sales: {
-            redact_user: $('settingRedactUser').checked
+            redact_user: $('settingRedactUser').checked,
+            default_business_direction: $('settingBusinessDirection')?.value || 'cloud_ai'
           }
         };
         if (!body.platforms.enabled.length) {

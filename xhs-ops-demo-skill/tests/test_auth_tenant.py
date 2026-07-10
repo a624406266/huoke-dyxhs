@@ -116,6 +116,9 @@ class ServerAuthTests(unittest.TestCase):
         import server
 
         self.server = importlib.reload(server)
+        self.server.CONFIG.setdefault("xhs", {})["enable_follow_actions"] = False
+        self.server.CONFIG.setdefault("douyin", {})["enable_follow_actions"] = False
+        self.server.CONFIG.setdefault("douyin", {})["enable_dm_actions"] = False
 
         class QuietHandler(self.server.Handler):
             def log_message(self, format: str, *args: Any) -> None:
