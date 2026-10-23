@@ -1,7 +1,6 @@
 param(
     [int]$Port = 8765,
-    [switch]$NoOpen,
-    [switch]$WithPlaywright
+    [switch]$NoOpen
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,6 +13,7 @@ $env:PYTHONIOENCODING = "utf-8"
 $pythonCandidates = @()
 if ($env:PYTHON_BIN) { $pythonCandidates += $env:PYTHON_BIN }
 $pythonCandidates += @(
+    (Join-Path $SkillRoot ".runtime\.venv\Scripts\python.exe"),
     (Join-Path $env:USERPROFILE ".workbuddy\binaries\python\versions\3.13.12\python.exe"),
     (Join-Path $env:LOCALAPPDATA "Programs\Python\Python313\python.exe")
 )
@@ -39,7 +39,6 @@ if (-not $python) {
 
 $args = @(".\scripts\launch_local.py", "--port", "$Port")
 if ($NoOpen) { $args += "--no-open" }
-if ($WithPlaywright) { $args += "--with-playwright" }
 
 Write-Host "Starting local open lead workbench on http://127.0.0.1:$Port/index.html"
 & $python @args

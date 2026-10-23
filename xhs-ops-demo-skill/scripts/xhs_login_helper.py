@@ -6,61 +6,23 @@ import json
 import os
 import platform
 import shutil
-import socket
 import subprocess
 import sys
-import threading
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
+
+from browser_session import BrowserSession, cdp_ready
 
 
 LOGIN_URL = "https://www.xiaohongshu.com/explore"
 REQUIRED_COOKIES = ("a1", "webId", "web_session")
 
 
-def find_free_port(start: int = 9223, end: int = 9323) -> int:
-    for port in range(start, end + 1):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(0.2)
-            if sock.connect_ex(("127.0.0.1", port)) != 0:
-                return port
-    raise RuntimeError("未找到可用 Chrome 调试端口。")
-
-
-def find_existing_cdp_port(start: int = 9223, end: int = 9323) -> int | None:
-    for port in range(start, end + 1):
-        if cdp_ready(port):
-            return port
-    return None
-
-
-def chrome_executable() -> Path:
-    system = platform.system().lower()
-    candidates: list[Path]
-    if "windows" in system:
-        candidates = [
-            Path(os.environ.get("PROGRAMFILES", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
-            Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
-            Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
-        ]
-    elif "darwin" in system:
-        candidates = [
-            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-            Path.home() / "Applications" / "Google Chrome.app" / "Contents" / "MacOS" / "Google Chrome",
-        ]
-    else:
-        candidates = [Path("/usr/bin/google-chrome"), Path("/usr/bin/chromium"), Path("/usr/bin/chromium-browser")]
-
-    for candidate in candidates:
-        if candidate and candidate.exists():
-            return candidate
-    raise RuntimeError("未找到 Google Chrome，请先安装 Chrome 后再使用网页登录助手。")
-
-
 def xhs_python() -> Path:
+    local_python = Path(__file__).resolve().parent.parent / ".runtime" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if local_python.exists():
+        return local_python
     if platform.system().lower().startswith("win"):
         candidate = Path.home() / ".codex" / "tools" / "xiaohongshu-cli" / ".venv" / "Scripts" / "python.exe"
     else:
@@ -70,22 +32,11 @@ def xhs_python() -> Path:
     return Path(sys.executable)
 
 
-def cdp_ready(port: int) -> bool:
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1) as resp:
-            return resp.status == 200
-    except (urllib.error.URLError, TimeoutError, OSError):
-        return False
-
-
-class XhsLoginHelper:
+class XhsLoginHelper(BrowserSession):
     def __init__(self, root: Path, home_dir: Path | None = None) -> None:
         self.root = root
         self.home_dir = home_dir or root / "data" / "xhs-default-profile"
-        self.profile_dir = self.home_dir / "chrome-profile"
-        self.port: int | None = None
-        self.process: subprocess.Popen[Any] | None = None
-        self.lock = threading.Lock()
+        super().__init__(self.home_dir / "chrome-profile", (9230, 9323))
         self.mode = "idle"
         self.qr_client: Any | None = None
         self.qr_session: dict[str, Any] = {}
@@ -97,37 +48,12 @@ class XhsLoginHelper:
         return self._start_browser()
 
     def _start_browser(self) -> dict[str, Any]:
-        if self.port and cdp_ready(self.port):
+        with self.lock:
+            self._close_qr_client_locked()
+            self.mode = "idle"
+            self.start_browser(LOGIN_URL)
             self.mode = "browser"
-            return self._session_payload("running", "登录/验证窗口已打开，请在 Chrome 中完成操作。")
-
-        existing_port = find_existing_cdp_port()
-        if existing_port:
-            self.port = existing_port
-            self._open_url_in_chrome()
-            self.mode = "browser"
-            return self._session_payload("running", "已连接现有 Chrome 调试会话，并打开小红书页面。")
-
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
-        self.port = find_free_port(9230, 9323)
-        chrome = chrome_executable()
-        args = [
-            str(chrome),
-            f"--remote-debugging-port={self.port}",
-            "--remote-debugging-address=127.0.0.1",
-            f"--user-data-dir={self.profile_dir}",
-            "--new-window",
-            "--no-first-run",
-            "--disable-default-apps",
-            LOGIN_URL,
-        ]
-        self.process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(30):
-            if cdp_ready(self.port):
-                self.mode = "browser"
-                return self._session_payload("running", "已打开小红书登录/验证窗口。")
-            time.sleep(0.5)
-        raise RuntimeError("Chrome 登录窗口已尝试启动，但调试端口未就绪。请关闭窗口后重试。")
+            return self._session_payload("running", "小红书登录/验证窗口已打开，请在 Chrome 中完成操作。")
 
     def _start_qrcode(self) -> dict[str, Any]:
         try:
@@ -138,32 +64,37 @@ class XhsLoginHelper:
 
         with self.lock:
             self._close_qr_client_locked()
+            self.mode = "idle"
             self.home_dir.mkdir(parents=True, exist_ok=True)
             a1 = _generate_a1()
             webid = _generate_webid()
             client = XhsClient({"a1": a1, "webId": webid}, request_delay=0)
-            try:
-                activate_data = client.login_activate()
-                _apply_session_cookies(client, activate_data)
-            except Exception:
-                pass
-            qr_data = client.create_qr_login()
-            qr_url = str(qr_data.get("url") or "").strip()
-            if not qr_url:
-                client.close()
-                raise RuntimeError(f"小红书二维码创建失败：{qr_data}")
             self.qr_client = client
-            self.mode = "qrcode"
-            self.qr_session = {
-                "a1": a1,
-                "webid": webid,
-                "qr_id": str(qr_data.get("qr_id") or ""),
-                "code": str(qr_data.get("code") or ""),
-                "qr_url": qr_url,
-                "created_at": time.time(),
-                "last_status": 0,
-            }
-            return self._qrcode_payload("waiting", "请使用小红书 App 扫描二维码并在手机上确认登录。")
+            try:
+                try:
+                    activate_data = client.login_activate()
+                    _apply_session_cookies(client, activate_data)
+                except Exception:
+                    pass
+                qr_data = client.create_qr_login()
+                qr_url = str(qr_data.get("url") or "").strip()
+                if not qr_url:
+                    raise RuntimeError("小红书二维码创建失败：未返回二维码地址。")
+                self.qr_session = {
+                    "a1": a1,
+                    "webid": webid,
+                    "qr_id": str(qr_data.get("qr_id") or ""),
+                    "code": str(qr_data.get("code") or ""),
+                    "qr_url": qr_url,
+                    "created_at": time.time(),
+                    "last_status": 0,
+                }
+                payload = self._qrcode_payload("waiting", "请使用小红书 App 扫描二维码并在手机上确认登录。")
+                self.mode = "qrcode"
+                return payload
+            except BaseException:
+                self._close_qr_client_locked()
+                raise
 
     def _close_qr_client_locked(self) -> None:
         if self.qr_client is not None:
@@ -179,17 +110,7 @@ class XhsLoginHelper:
         remaining: list[str] = []
         with self.lock:
             self._close_qr_client_locked()
-            if self.process and self.process.poll() is None:
-                try:
-                    self.process.terminate()
-                    self.process.wait(timeout=5)
-                except Exception:
-                    try:
-                        self.process.kill()
-                    except Exception:
-                        pass
-            self.process = None
-            self.port = None
+            self.stop_browser()
             self.mode = "idle"
 
             for path in (self.home_dir / ".xiaohongshu-cli", self.profile_dir):
@@ -321,7 +242,8 @@ class XhsLoginHelper:
             return self._qrcode_status()
         if not self.port:
             return {"running": False, "message": "登录/验证窗口未启动。"}
-        return self._session_payload("running" if cdp_ready(self.port) else "closed", "登录/验证窗口运行中。" if cdp_ready(self.port) else "登录/验证窗口已关闭。")
+        ready = cdp_ready(self.port)
+        return self._session_payload("running" if ready else "closed", "登录/验证窗口运行中。" if ready else "登录/验证窗口已关闭。")
 
     def _qrcode_status(self) -> dict[str, Any]:
         try:
@@ -396,12 +318,6 @@ class XhsLoginHelper:
         except OSError:
             pass
         return cookie_path
-
-    def _open_url_in_chrome(self) -> None:
-        try:
-            subprocess.Popen([str(chrome_executable()), LOGIN_URL], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
 
     def _extract_script(self) -> str:
         required = json.dumps(REQUIRED_COOKIES)

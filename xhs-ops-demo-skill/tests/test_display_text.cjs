@@ -1,0 +1,56 @@
+'use strict';
+const assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
+const context = vm.createContext({});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets/display-text.js'),'utf8'),context);
+const ui = context.DisplayText;
+for (const stage of ['search','details','read_detail','time_filter','search_filter','completed','partial','needs_action']) {
+  assert.match(ui.stage(stage),/[\u3400-\u9fff]/);
+  assert.notEqual(ui.stage(stage),stage);
+}
+assert.equal(ui.stage('search'),'搜索采集');
+assert.equal(ui.status('applied'),'已生成候选','feedback applied must not claim activation');
+assert.equal(ui.status('unknown'),'待核实','outreach unknown must not claim success');
+assert.equal(ui.status('new_internal_status'),'状态待确认');
+assert.equal(ui.agent('Model Request'),'模型请求');
+assert.equal(ui.agent('Model Usage'),'模型用量');
+assert.equal(ui.agent('需求信号 Agent'),'需求信号智能体');
+assert.equal(ui.purpose('batch note relevance'),'批量判断笔记相关性');
+const ends = ['xhs:workbuddy:no_more_results','douyin:Agent:培训:no_more_results','configured_pages_completed'];
+const frozen = JSON.stringify(ends);
+assert.equal(ui.stopReasons(ends),'小红书「workbuddy」：平台没有更多结果；抖音「Agent:培训」：平台没有更多结果；设定页数已完成');
+assert.equal(JSON.stringify(ends),frozen,'formatting must not edit API values');
+assert.equal(ui.reason('unknown_publish_time'),'发布时间待核验');
+assert.equal(ui.message('Failed to fetch'),'无法连接服务，请确认本地项目已启动并检查网络连接。');
+assert.equal(ui.message('Timeout 30000ms exceeded. waiting for locator'),'等待平台页面响应超时，请检查登录状态和目标页面后重试。');
+assert.equal(ui.message('opaque provider failure'),'系统返回了需要核查的信息，请查看技术详情。');
+assert.equal(ui.message('任务已完成'),'任务已完成');
+assert.equal(ui.message('任务报错，请查看 https://example.com/qa?reason=failed'),'任务报错，请查看 https://example.com/qa?reason=failed');
+assert.equal(ui.humanize({stage:'search',status:'partial',platform:'xhs',count:0}),'阶段：搜索采集；状态：部分完成；平台：小红书；数量：0');
+assert.equal(ui.humanize({usage:{prompt_tokens:null,completion_tokens:0}}),'模型用量：输入用量：未提供；输出用量：0');
+
+// Existing report prose from the sales-facing screen, without any live data.
+const report = '本次覆盖 xhs 6 个关键词；topLeads 与 noteContexts 为空，qualifiedCount=0、leadsCount=0。全部 visited=true、exhausted=true。commentsCollected=0 且 noteContexts=[]，classificationCounts={}。filterCounts 中 duplicate=5、outside_time_range=1。failures=[] 且 endReasons 多为 no_more_results。回传 noteContexts 与逐条 reason，调整 timeFilter。workbuddy 不能据此判定无需求。';
+const readable = ui.report(report);
+assert.doesNotMatch(readable,/\b(?:xhs|topLeads|noteContexts|qualifiedCount|leadsCount|visited|exhausted|true|commentsCollected|classificationCounts|filterCounts|duplicate|outside_time_range|failures|endReasons|no_more_results|reason|timeFilter)\b/);
+assert.match(readable,/小红书 6 个关键词/);
+assert.match(readable,/合格需求数为 0 条/);
+assert.match(readable,/重复内容为 5 条、超出时间范围的内容为 1 条/);
+assert.match(readable,/未记录采集失败/);
+assert.match(readable,/workbuddy 不能据此判定无需求/);
+const source = '用户原话“Agent 的 noteContexts 是什么”：workbuddy / gpt-4.1 / https://example.test/qa?reason=failed，`noteContexts=[]`。';
+const converted = ui.report(source);
+assert.match(converted,/“Agent 的 noteContexts 是什么”/,'quoted source must remain verbatim');
+assert.match(converted,/https:\/\/example.test\/qa\?reason=failed/,'URLs must remain intact');
+assert.match(converted,/workbuddy \/ gpt-4.1/,'brand/model names must remain intact');
+assert.match(converted,/暂无笔记分析明细/);
+assert.equal(ui.report('正文未提供原文证据，不能判定无需求。'),'正文未提供原文证据，不能判定无需求。');
+assert.equal(ui.report('模型没有输出报告。'),'模型没有输出报告。');
+assert.equal(ui.report('关键词为 Agent，用户原话为“reason”。'),'关键词为 Agent，用户原话为“reason”。');
+assert.equal(ui.report('原文证据："duplicate"；关键词 reason'),'原文证据："duplicate"；关键词 reason');
+assert.equal(ui.report('Agent 与 reason 的讨论，qualifiedCount=0。',['Agent','reason']),'Agent 与 reason 的讨论，合格需求数为 0 条。');
+const nested = ui.report('timeFilter=week，filterCounts={"duplicate":5,"outside_time_range":1}。visited=True/readDetail=false，classificationCounts={"demand":0}。');
+assert.doesNotMatch(nested,/week|duplicate|outside_time_range|filterCounts|[{}]|True|false/);
+assert.match(nested,/搜索时间范围：近一周/);
+assert.match(nested,/重复内容：5；超出时间范围的内容：1/);
+assert.match(nested,/读取笔记详情：否/);
+console.log('PASS: Chinese status, progress, errors and legacy report prose; original source, keywords, API values and usage facts retained.');

@@ -4,16 +4,13 @@ import copy
 import json
 import os
 import platform
+import re
 from pathlib import Path
 from typing import Any
 
-from product_catalog import business_direction_options
-
+from config_contract import LLM_TIMEOUT_DEFAULTS, boolean, llm_temperature, llm_timeout_seconds, platform_settings
 
 ROOT = Path(__file__).resolve().parent.parent
-LEGACY_STORAGE_URL_KEY = "database" + "_url"
-
-
 DEFAULT_CONFIG: dict[str, Any] = {
     "server": {
         "host": "127.0.0.1",
@@ -21,11 +18,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "xhs": {
         "bin": "",
-        "read_delay_min": 7.0,
-        "read_delay_max": 60.0,
-        "max_count": 20,
-        "max_comments_per_note": 50,
-        "enable_follow_actions": False,
+        "enable_follow_actions": True,
+        "enable_dm_actions": True,
     },
     "platforms": {
         "enabled": ["xhs"],
@@ -37,32 +31,28 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "api_key_env": "SOCIALDATAX_API_KEY",
     },
     "douyin": {
-        "read_delay_min": 7.0,
-        "read_delay_max": 60.0,
-        "max_count": 20,
-        "max_comments_per_post": 50,
-        "enable_follow_actions": False,
-        "enable_dm_actions": False,
+        "enable_follow_actions": True,
+        "enable_dm_actions": True,
     },
     "llm": {
         "api_key": "",
-        "api_base": "https://poolrouter.com/v1",
-        "model": "gemini-3.5-flash",
+        "api_base": "",
+        "model": "",
         "temperature": 0.6,
+        **LLM_TIMEOUT_DEFAULTS,
     },
     "sales": {
-        "default_min_score": 60,
-        "default_business_direction": "cloud_ai",
         "redact_user": False,
     },
+    "collection": {"maxKeywords": 6, "maxPagesPerKeyword": 1, "maxNotes": 20, "maxCommentsPerNote": 20, "maxCommentsTotal": 200, "delayMin": 1, "delayMax": 3},
     "storage": {
-        "db_path": str(ROOT / "data" / "sales_leads.db"),
+        "db_path": str(ROOT / "data" / "keyword_workbench_v3.db"),
     },
     "auth": {
         "admin_username": "admin",
+        "admin_display_name": "管理员",
         "admin_password_hash": "",
         "session_ttl_seconds": 86400,
-        "sales_users": [],
     },
 }
 
@@ -80,7 +70,10 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
 def read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+    value = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(value, dict):
+        raise ValueError("配置文件必须包含 JSON 对象。")
+    return value
 
 
 def local_config_path() -> Path:
@@ -114,12 +107,19 @@ def load_config() -> dict[str, Any]:
         config["auth"]["admin_username"] = os.environ["XHS_ADMIN_USERNAME"]
     if os.environ.get("XHS_ADMIN_PASSWORD_HASH"):
         config["auth"]["admin_password_hash"] = os.environ["XHS_ADMIN_PASSWORD_HASH"]
-    if os.environ.get("HARNESS_ADMIN_PASSWORD_HASH"):
-        config["auth"]["admin_password_hash"] = os.environ["HARNESS_ADMIN_PASSWORD_HASH"]
     if os.environ.get("SESSION_TTL_SECONDS"):
         config["auth"]["session_ttl_seconds"] = int(os.environ["SESSION_TTL_SECONDS"])
 
-    (config.get("storage") or {}).pop(LEGACY_STORAGE_URL_KEY, None)
+    db_path = Path(config["storage"]["db_path"])
+    if not db_path.is_absolute():
+        db_path = ROOT / db_path
+    config["storage"]["db_path"] = str(db_path)
+    config["llm"]["temperature"] = llm_temperature(config["llm"]["temperature"])
+    for field, default in LLM_TIMEOUT_DEFAULTS.items():
+        config["llm"][field] = llm_timeout_seconds(config["llm"].get(field, default), field)
+    for platform_key in ("xhs", "douyin"):
+        config[platform_key] = platform_settings(DEFAULT_CONFIG[platform_key], config[platform_key], platform_key)
+    config["sales"] = {"redact_user": boolean(config["sales"]["redact_user"], "sales.redact_user")}
     return config
 
 
@@ -129,7 +129,10 @@ def load_local_config() -> dict[str, Any]:
 
 def save_local_config(config: dict[str, Any]) -> None:
     path = local_config_path()
-    path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(config, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    temporary.chmod(0o600)
+    temporary.replace(path)
 
 
 def public_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -142,12 +145,14 @@ def public_settings(config: dict[str, Any]) -> dict[str, Any]:
     sales = config.get("sales") or {}
     socialdatax_env = str(socialdatax.get("api_key_env") or "SOCIALDATAX_API_KEY")
     return {
-        "businessDirections": business_direction_options(),
-        "defaultBusinessDirection": str(sales.get("default_business_direction") or "cloud_ai"),
         "llm": {
             "api_base": llm.get("api_base", ""),
             "model": llm.get("model", ""),
-            "temperature": llm.get("temperature", 0.6),
+            "temperature": llm_temperature(llm.get("temperature", 0.6)),
+            **{
+                field: llm_timeout_seconds(llm.get(field, default), field)
+                for field, default in LLM_TIMEOUT_DEFAULTS.items()
+            },
             "has_api_key": bool(llm.get("api_key") or os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")),
         },
         "platforms": {
@@ -162,21 +167,15 @@ def public_settings(config: dict[str, Any]) -> dict[str, Any]:
         },
         "xhs": {
             "bin": xhs.get("bin", ""),
-            "read_delay_min": xhs.get("read_delay_min", 7.0),
-            "read_delay_max": xhs.get("read_delay_max", 60.0),
-            "max_comments_per_note": xhs.get("max_comments_per_note", 50),
-            "enable_follow_actions": bool(xhs.get("enable_follow_actions", False)),
+            "enable_follow_actions": bool(xhs.get("enable_follow_actions", True)),
+            "enable_dm_actions": bool(xhs.get("enable_dm_actions", True)),
         },
         "douyin": {
-            "read_delay_min": douyin.get("read_delay_min", 7.0),
-            "read_delay_max": douyin.get("read_delay_max", 60.0),
-            "max_comments_per_post": douyin.get("max_comments_per_post", 50),
             "enable_follow_actions": bool(douyin.get("enable_follow_actions", False)),
             "enable_dm_actions": bool(douyin.get("enable_dm_actions", False)),
         },
         "sales": {
             "redact_user": bool(sales.get("redact_user", False)),
-            "default_business_direction": str(sales.get("default_business_direction") or "cloud_ai"),
         },
         "storage": {
             "backend": "sqlite",
@@ -186,6 +185,11 @@ def public_settings(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def update_local_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("设置参数必须为对象。")
+    for section in ("llm", "xhs", "douyin", "platforms", "opencli", "socialdatax", "sales", "collection"):
+        if section in payload and not isinstance(payload[section], dict):
+            raise ValueError(f"{section} 设置必须为对象。")
     local_config = deep_merge(copy.deepcopy(DEFAULT_CONFIG), load_local_config())
     llm_payload = payload.get("llm") or {}
     xhs_payload = payload.get("xhs") or {}
@@ -198,26 +202,26 @@ def update_local_settings(payload: dict[str, Any]) -> dict[str, Any]:
     llm = local_config.setdefault("llm", {})
     if "api_base" in llm_payload:
         llm["api_base"] = str(llm_payload.get("api_base") or "").strip()
+        if llm["api_base"]:
+            from llm_client import LLMRequestError, validate_api_base
+            try:
+                validate_api_base(llm["api_base"])
+            except LLMRequestError as exc:
+                raise ValueError(str(exc)) from None
     if "model" in llm_payload:
         llm["model"] = str(llm_payload.get("model") or "").strip()
     if "temperature" in llm_payload:
-        llm["temperature"] = float(llm_payload.get("temperature") or 0.6)
+        llm["temperature"] = llm_temperature(llm_payload["temperature"])
+    for field, default in LLM_TIMEOUT_DEFAULTS.items():
+        value = llm_payload[field] if field in llm_payload else llm.get(field, default)
+        llm[field] = llm_timeout_seconds(value, field)
     if llm_payload.get("api_key"):
         llm["api_key"] = str(llm_payload["api_key"]).strip()
-    if llm_payload.get("clear_api_key"):
+    if "clear_api_key" in llm_payload and boolean(llm_payload["clear_api_key"], "llm.clear_api_key"):
         llm["api_key"] = ""
 
-    xhs = local_config.setdefault("xhs", {})
-    if "bin" in xhs_payload:
-        xhs["bin"] = str(xhs_payload.get("bin") or "").strip()
-    if "read_delay_min" in xhs_payload:
-        xhs["read_delay_min"] = float(xhs_payload.get("read_delay_min") or 7.0)
-    if "read_delay_max" in xhs_payload:
-        xhs["read_delay_max"] = float(xhs_payload.get("read_delay_max") or 60.0)
-    if "max_comments_per_note" in xhs_payload:
-        xhs["max_comments_per_note"] = min(max(int(xhs_payload.get("max_comments_per_note") or 50), 1), 500)
-    if "enable_follow_actions" in xhs_payload:
-        xhs["enable_follow_actions"] = bool(xhs_payload.get("enable_follow_actions"))
+    for platform_key, platform_payload in (("xhs", xhs_payload), ("douyin", douyin_payload)):
+        local_config[platform_key] = platform_settings(local_config[platform_key], platform_payload, platform_key)
 
     platforms = local_config.setdefault("platforms", {})
     if "enabled" in platforms_payload:
@@ -230,29 +234,19 @@ def update_local_settings(payload: dict[str, Any]) -> dict[str, Any]:
     socialdatax = local_config.setdefault("socialdatax", {})
     if "api_key_env" in socialdatax_payload:
         api_key_env = str(socialdatax_payload.get("api_key_env") or "SOCIALDATAX_API_KEY").strip() or "SOCIALDATAX_API_KEY"
-        if api_key_env.lower().startswith(("sk-", "sdx-")):
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", api_key_env):
             raise ValueError("SocialDataX 字段只填写环境变量名，例如 SOCIALDATAX_API_KEY；不要粘贴真实 Key。")
         socialdatax["api_key_env"] = api_key_env
 
-    douyin = local_config.setdefault("douyin", {})
-    if "read_delay_min" in douyin_payload:
-        douyin["read_delay_min"] = float(douyin_payload.get("read_delay_min") or 7.0)
-    if "read_delay_max" in douyin_payload:
-        douyin["read_delay_max"] = float(douyin_payload.get("read_delay_max") or 60.0)
-    if "max_comments_per_post" in douyin_payload:
-        douyin["max_comments_per_post"] = min(max(int(douyin_payload.get("max_comments_per_post") or 50), 1), 500)
-    if "enable_follow_actions" in douyin_payload:
-        douyin["enable_follow_actions"] = bool(douyin_payload.get("enable_follow_actions"))
-    if "enable_dm_actions" in douyin_payload:
-        douyin["enable_dm_actions"] = bool(douyin_payload.get("enable_dm_actions"))
-
-    sales = local_config.setdefault("sales", {})
+    sales = {"redact_user": local_config["sales"]["redact_user"]}
     if "redact_user" in sales_payload:
-        sales["redact_user"] = bool(sales_payload.get("redact_user"))
-    if "default_business_direction" in sales_payload:
-        sales["default_business_direction"] = str(sales_payload.get("default_business_direction") or "cloud_ai").strip() or "cloud_ai"
+        sales["redact_user"] = boolean(sales_payload["redact_user"], "sales.redact_user")
+    local_config["sales"] = sales
+    if "collection" in payload:
+        from agent_harness.planning import normalize_plan
+        normalized = normalize_plan({"seedKeywords": ["默认参数"], **payload["collection"]})
+        local_config["collection"] = {k: normalized[k] for k in ("maxKeywords", "maxPagesPerKeyword", "maxNotes", "maxCommentsPerNote", "maxCommentsTotal", "delayMin", "delayMax", "timeFilter", "sort", "metric", "readDetail", "scanLeads", "minScore", "platforms")}
 
-    local_config.setdefault("storage", {}).pop(LEGACY_STORAGE_URL_KEY, None)
     save_local_config(local_config)
     return load_config()
 

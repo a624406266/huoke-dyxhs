@@ -5,14 +5,13 @@
   },
   "xhs": {
     "bin": "",
-    "read_delay_min": 7,
-    "read_delay_max": 60,
-    "max_count": 20,
-    "max_comments_per_note": 50,
-    "enable_follow_actions": false
+    "enable_follow_actions": true,
+    "enable_dm_actions": true
   },
   "platforms": {
-    "enabled": ["xhs"]
+    "enabled": [
+      "xhs"
+    ]
   },
   "opencli": {
     "bin": ""
@@ -21,25 +20,31 @@
     "api_key_env": "SOCIALDATAX_API_KEY"
   },
   "douyin": {
-    "read_delay_min": 7,
-    "read_delay_max": 60,
-    "max_count": 20,
-    "max_comments_per_post": 50,
-    "enable_follow_actions": false,
-    "enable_dm_actions": false
+    "enable_follow_actions": true,
+    "enable_dm_actions": true
   },
   "llm": {
     "api_key": "",
-    "api_base": "https://poolrouter.com/v1",
-    "model": "gemini-3.5-flash",
-    "temperature": 0.6
+    "api_base": "",
+    "model": "",
+    "temperature": 0.6,
+    "connect_timeout_s": 30,
+    "read_timeout_s": 60,
+    "total_timeout_s": 300
   },
   "sales": {
-    "default_min_score": 60,
-    "default_business_direction": "cloud_ai",
     "redact_user": false
   },
   "storage": {
-    "db_path": "data/sales_leads.db"
+    "db_path": "data/keyword_workbench_v3.db"
+  },
+  "collection": {
+    "maxKeywords": 6,
+    "maxPagesPerKeyword": 1,
+    "maxNotes": 20,
+    "maxCommentsPerNote": 20,
+    "maxCommentsTotal": 200,
+    "delayMin": 1,
+    "delayMax": 3
   }
 }

@@ -25,15 +25,14 @@ def is_port_open(host: str, port: int) -> bool:
 def health_ok(host: str, port: int) -> bool:
     try:
         with urlopen(f"http://{host}:{port}/api/config", timeout=1) as resp:
-            return resp.status == 200
+            data = json.loads(resp.read())
+            return resp.status == 200 and data.get("ok") is True and (data.get("data") or {}).get("app") == "keyword-workbench"
     except Exception:
         return False
 
 
-def run_bootstrap(include_playwright: bool) -> Path:
+def run_bootstrap() -> Path:
     cmd = [sys.executable, str(ROOT / "scripts" / "bootstrap_deps.py"), "--print-python"]
-    if include_playwright:
-        cmd.append("--with-playwright")
     proc = subprocess.run(cmd, cwd=str(ROOT), text=True, capture_output=True, check=True)
     lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
     if not lines:
@@ -51,7 +50,7 @@ def write_local_config(host: str, port: int) -> None:
     config["server"]["host"] = host
     config["server"]["port"] = port
     config.setdefault("storage", {})
-    config["storage"]["db_path"] = str(ROOT / "data" / "sales_leads.db")
+    config["storage"]["db_path"] = str(ROOT / "data" / "keyword_workbench_v3.db")
     path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print("Created config.local.json")
 
@@ -80,15 +79,13 @@ def main() -> int:
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8765")))
     parser.add_argument("--no-open", action="store_true")
-    parser.add_argument("--with-playwright", action="store_true")
     args = parser.parse_args()
 
     host = args.host
+    if host not in {"127.0.0.1", "localhost"}:
+        raise ValueError("本地单人版只允许本机地址。")
     port = args.port
     url = f"http://{host}:{port}/index.html"
-
-    venv_python = run_bootstrap(include_playwright=args.with_playwright)
-    write_local_config(host, port)
 
     if health_ok(host, port):
         print(f"Open lead workbench is already running: {url}")
@@ -97,6 +94,9 @@ def main() -> int:
         return 0
     if is_port_open(host, port):
         raise RuntimeError(f"端口 {host}:{port} 已被占用，但不是本地工作台服务。")
+
+    venv_python = run_bootstrap()
+    write_local_config(host, port)
 
     env = {
         **os.environ,
@@ -125,8 +125,15 @@ def main() -> int:
             time.sleep(0.25)
         raise RuntimeError("本地服务启动超时。")
     except KeyboardInterrupt:
-        proc.terminate()
         return 130
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
 
 
 if __name__ == "__main__":

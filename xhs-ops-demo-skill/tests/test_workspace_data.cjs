@@ -1,0 +1,43 @@
+/* Transport and serialized polling, with no HTTP server or external calls. */
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const timers = new Map(); let timerId = 0;
+const scope = { setTimeout(fn) { const id = ++timerId; timers.set(id, fn); return id; }, clearTimeout(id) { timers.delete(id); } };
+vm.createContext(scope);
+vm.runInContext(fs.readFileSync(path.join(__dirname, '../assets/workspace-data.js'), 'utf8'), scope);
+const {requestJson, createPoller} = scope.WorkspaceData;
+const flush = () => new Promise(setImmediate);
+(async () => {
+  const requests = [];
+  const fetcher = async (url, options) => { requests.push({url,options}); return {ok:true,status:200,json:async()=>({ok:true,data:{saved:true}})}; };
+  assert.equal((await requestJson('/fixture', {method:'POST',body:{text:'原文'},fetcher})).saved,true);
+  assert.equal(requests[0].options.credentials,'same-origin');
+  assert.deepEqual(JSON.parse(requests[0].options.body),{text:'原文'});
+  assert.equal(requests[0].options.headers['Content-Type'],'application/json');
+  await assert.rejects(requestJson('/failure',{fetcher:async()=>({ok:false,status:503,json:async()=>({ok:true,data:{}})})}),/503/);
+  await assert.rejects(requestJson('/invalid',{fetcher:async()=>({ok:true,status:200,json:async()=>{throw new Error('bad JSON');}})}),/无法解析/);
+  let expired=0;
+  await assert.rejects(requestJson('/private',{onUnauthorized:()=>expired++,fetcher:async()=>({ok:false,status:401,json:async()=>{throw new Error('must not parse');}})}),/会话已过期/);
+  assert.equal(expired,1);
+  const reads=[],renders=[],errors=[]; let visible=true, outstanding=0,maxOutstanding=0;
+  const poller=createPoller({delay:2500,isActive:()=>visible,read:()=>{
+    outstanding++;maxOutstanding=Math.max(maxOutstanding,outstanding);
+    return new Promise((resolve,reject)=>reads.push({resolve:value=>{outstanding--;resolve(value);},reject:error=>{outstanding--;reject(error);}}));
+  },render:value=>renders.push(value),onError:error=>errors.push(error.message)});
+  poller.start();assert.equal(timers.size,1);
+  const [id,tick]=[...timers.entries()][0];timers.delete(id);tick();await flush();
+  const sameRead=poller.refresh();await flush();assert.equal(reads.length,1,'manual refresh shares the pending poll');
+  reads[0].resolve('first');await sameRead;await flush();assert.deepEqual(renders,['first']);assert.equal(timers.size,1);
+  const next=poller.refresh();await flush();poller.stop();visible=false;
+  reads[1].resolve('closed');await next;assert.deepEqual(renders,['first']);assert.equal(timers.size,0);
+  visible=true;const stale=poller.refresh();await flush();poller.stop();
+  const reopened=poller.refresh();await flush();assert.equal(reads.length,3,'reopening waits for the old read');
+  reads[2].resolve('old session');await stale;await flush();assert.equal(reads.length,4);
+  reads[3].resolve('new session');await reopened;assert.deepEqual(renders,['first','new session']);
+  const failed=poller.refresh();await flush();reads[4].reject(new Error('offline'));await failed;
+  assert.deepEqual(errors,['offline']);assert.equal(timers.size,0);assert.equal(maxOutstanding,1);
+  console.log('PASS: shared JSON transport, HTTP/auth failures, serial polls, close/reopen generation guards and error cleanup.');
+})().catch(error=>{console.error(error);process.exitCode=1;});

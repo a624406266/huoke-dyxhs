@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>开放获客工作台</title>
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="excel-export.js"></script>
   <style>
     :root {
       --bg: #f7f7f8;
@@ -31,7 +31,12 @@
     h1 { margin: 0; font-size: 26px; display: flex; gap: 10px; align-items: center; letter-spacing: 0; }
     h1 .badge { font-size: 12px; color: var(--text); background: var(--primary-soft); padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; }
     .header-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-    .nav-actions { display: flex; align-items: center; gap: 10px; }
+    .nav-actions { display: flex; align-items: center; gap: 10px; flex-wrap:wrap; }
+    .header-row { flex-wrap:wrap; }
+    .section-title > button { width:auto; padding:0 16px; margin:0; flex-shrink:0; }
+    .result-shell > .small, .result-shell > label { margin-left:18px; margin-right:18px; }
+    .result-shell > select { margin:0 18px; width:calc(100% - 36px); }
+    #outreachConfirmation { color:var(--text); font-size:14px; overflow-wrap:anywhere; }
     .nav-actions button { width: auto; margin-top: 0; }
     .nav-user { color: var(--muted); font-size: 12px; font-weight: 800; }
     .nav-link {
@@ -185,11 +190,11 @@
       position: fixed; inset: 0; background: rgba(15,23,42,.42); display: none; align-items: center; justify-content: center;
       z-index: 50; padding: 18px;
     }
-    .modal { width: min(680px, 100%); background: white; border-radius: 8px; box-shadow: 0 18px 40px rgba(15,23,42,.18); border: 1px solid var(--line); }
+    .modal { max-height:calc(100dvh - 36px); display:flex; flex-direction:column; width: min(680px, 100%); background: white; border-radius: 8px; box-shadow: 0 18px 40px rgba(15,23,42,.18); border: 1px solid var(--line); }
     .modal-head { padding: 18px 20px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; }
     .modal-head h2 { margin: 0; font-size: 18px; }
-    .modal-body { padding: 20px; }
-    .modal-actions { padding: 0 20px 20px; display: flex; gap: 10px; justify-content: flex-end; }
+    .modal-body { padding: 20px; overflow:auto; }
+    .modal-actions { padding: 12px 20px 20px; flex-shrink:0; flex-wrap:wrap; display: flex; gap: 10px; justify-content: flex-end; }
     .modal-actions button { width: auto; padding: 0 18px; margin: 0; }
     .btn-secondary { background: #4b5563; }
     .field-help { margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.45; }
@@ -385,21 +390,26 @@
       .lead-link { white-space: normal; }
     }
   </style>
+  <link rel="stylesheet" href="workspace.css" />
+  <link rel="stylesheet" href="workbench-workspace.css" />
+  <script src="workspace-data.js"></script>
+  <script src="display-text.js"></script>
+  <script src="workspace-ui.js"></script>
 </head>
 <body>
   <header>
     <div class="header-row">
-      <h1>开放获客工作台 <span class="badge">需求描述 + AI 线索雷达</span></h1>
+      <h1>开放获客工作台 <span class="badge">关键词分析 · 线索研判 · 逐条触达</span></h1>
       <div class="nav-actions">
-        <a class="nav-link" href="harness.html">Harness 控制台</a>
-        <span id="salesNav" class="nav-actions">
-          <span id="salesUserLabel" class="nav-user">本地工作台</span>
+        <a class="nav-link" href="harness.html">管理后台</a>
+        <span id="salesNav" class="nav-actions" style="display:none;">
+          <span id="salesUserLabel" class="nav-user">本地工作台</span><button id="recoverOutreachBtn" class="nav-link" onclick="recoverLastOutreach()" style="display:none;">核实上次触达</button><button class="nav-link" onclick="logoutWorkbench()">退出</button>
           <button id="xhsLoginBtn" class="nav-link" title="小红书登录 / 验证">小红书登录</button>
           <button id="douyinLoginBtn" class="nav-link" title="抖音登录 / 验证">抖音登录</button>
         </span>
       </div>
     </div>
-    <div class="sub">面向不同团队和行业，采集分析小红书与抖音公开内容和评论。总控 Agent 先理解需求描述，再规划关键词、筛选帖子、识别可人工跟进线索。触达动作需逐条手动确认。</div>
+    <div class="sub">寻找智能体定制开发的委托、外包交付与询价需求。先确认服务、搜索目标与计划，再检索公开内容并人工审核；也可切换通用关键词研究。触达动作需逐条手动确认。</div>
   </header>
 
   <div id="xhsLoginModal" class="modal-mask">
@@ -436,7 +446,7 @@
       </div>
       <div class="modal-body">
         <div class="hint" style="margin-top:0;">
-          本机工作台使用本地 Chrome 抖音登录态。这里不会绕过验证码；如平台要求验证，请在打开的官方页面中人工完成。
+          本机工作台使用本地浏览器中的抖音登录状态。这里不会绕过验证码；如平台要求验证，请在打开的官方页面中人工完成。
         </div>
         <div class="btn-row" style="margin-top:10px;">
           <button type="button" onclick="startDouyinLogin()">打开抖音登录/验证窗口</button>
@@ -452,48 +462,58 @@
     </div>
   </div>
 
-  <div id="dmDraftModal" class="modal-mask">
-    <div class="modal">
-      <div class="modal-head">
-        <h2>私信草稿</h2>
-        <button class="icon-btn" style="box-shadow:none;width:34px;height:34px;font-size:16px;" onclick="closeDmDraft()">✕</button>
-      </div>
+  <section id="workbenchGate" class="card workspace-auth-card" aria-labelledby="workbenchLoginTitle">
+    <div class="workspace-auth-brand"><span class="workspace-auth-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m4 16 5-8 4 5 7-10M4 21h16"/><circle cx="20" cy="3" r="1"/></svg></span><span>获客工作台<span class="small">本机工作空间</span></span></div>
+    <div class="workspace-auth-heading"><h2 id="workbenchLoginTitle">登录工作台</h2><p class="small">使用本机管理员账号，与管理后台共享登录会话。</p></div>
+    <form class="workspace-auth-form" onsubmit="event.preventDefault();loginWorkbench()">
+      <div class="workspace-auth-field"><label for="workbenchUsername">管理员账号</label><input id="workbenchUsername" value="admin" autocomplete="username" required /></div>
+      <div class="workspace-auth-field"><label for="workbenchPassword">登录密码</label><input id="workbenchPassword" type="password" autocomplete="current-password" aria-describedby="workbenchLoginStatus" required /></div>
+      <div class="workspace-auth-actions"><p id="workbenchLoginStatus" role="status" aria-live="polite" class="workspace-auth-status small"></p><button id="workbenchLoginBtn" type="submit">登录工作台</button></div>
+    </form>
+    <div class="workspace-auth-footer"><span>首次使用？</span><a href="harness.html">设置管理员 <span aria-hidden="true">↗</span></a></div>
+  </section>
+
+  <div id="dmDraftModal" class="modal-mask" role="dialog" aria-modal="true" aria-labelledby="outreachTitle">
+    <div class="modal"><div class="modal-head"><h2 id="outreachTitle">逐条触达</h2><button class="icon-btn" onclick="closeDmDraft()" aria-label="关闭">✕</button></div>
       <div class="modal-body">
-        <div id="dmDraftMeta" class="small">请选择一条线索。</div>
-        <label for="dmDraftText">草稿内容</label>
-        <textarea id="dmDraftText" style="min-height:130px;"></textarea>
-        <div class="field-help">这里只生成和复制草稿，不会自动发送私信。请打开对象主页后，由账号使用者在小红书页面中人工确认发送。</div>
-        <div id="dmDraftStatus" class="field-help"></div>
-      </div>
-      <div class="modal-actions">
-        <button type="button" class="btn-secondary" onclick="closeDmDraft()">关闭</button>
-        <button type="button" class="btn-secondary" onclick="openLeadProfileFromDraft()">打开对象主页</button>
-        <button type="button" onclick="copyDmDraft()">复制话术</button>
-        <button id="sendDmBtn" type="button" onclick="sendDmDraft()" style="display:none;">发送抖音私信</button>
+        <div id="dmDraftMeta" class="small"></div>
+        <div id="outreachSource" class="hint" style="white-space:pre-wrap;"></div>
+        <label for="dmDraftText">最终正文</label><textarea id="dmDraftText" style="min-height:130px;" oninput="invalidateOutreachConfirmation()"></textarea>
+        <label for="draftInstruction">智能草稿要求（可选）</label><input id="draftInstruction" placeholder="例如：简短礼貌，先了解实际需求" />
+        <div class="btn-row"><button id="aiDraftBtn" onclick="generateOutreachDraft()">智能生成草稿</button><button class="btn-secondary" onclick="copyDmDraft()">复制正文</button></div>
+        <div id="outreachConfirmation" class="wb-outreach-confirmation" role="region" aria-labelledby="outreachConfirmationTitle" style="display:none;"></div>
+        <div id="dmDraftStatus" class="field-help" role="status"></div>
+      </div><div class="modal-actions">
+        <button class="btn-secondary" onclick="closeDmDraft()">关闭</button><button class="btn-secondary" onclick="openLeadProfileFromDraft()">打开对象主页</button>
+        <button id="prepareOutreachBtn" onclick="prepareOutreach()">核对账号与动作</button>
+        <button id="executeOutreachBtn" onclick="executeOutreach()" style="display:none;">确认执行本条动作</button>
+        <button id="refreshOutreachBtn" class="btn-secondary" onclick="refreshOutreachStatus()" style="display:none;">核实动作状态</button>
       </div>
     </div>
   </div>
 
-  <main id="salesMain">
-    <div id="status" class="card status"><span class="status-dot" aria-hidden="true"></span><span>等待任务。请先确认 xhs 已登录，Windows/macOS 会自动探测 xhs 路径。</span></div>
+  <main id="salesMain" style="display:none;">
+    <div id="status" class="card status"><span class="status-dot" aria-hidden="true"></span><span>尚未开始任务。确认搜索计划后才会开始采集。</span></div>
 
-    <section class="card panel">
+    <section id="wbConfiguration" class="card panel">
       <div class="panel-head">
         <div>
           <h2>配置区</h2>
-          <div class="small">先写清楚要找什么客户，再用种子词辅助搜索。</div>
+          <div class="small">输入关键词，预览并确认搜索计划后执行。</div>
         </div>
         <span class="pill">任务输入</span>
       </div>
       <div class="config-grid">
         <div>
-          <label for="demandDescription">需求描述 <span class="field-required">*</span></label>
-          <textarea id="demandDescription" required placeholder="例如：找深圳正在做 AI 客服私有化、想降低客服人力成本、或在评论里询问落地方案的潜在线索；也可以输入餐饮加盟、母婴课程、B2B SaaS 试用等任意获客需求。"></textarea>
-          <div class="field-help">必填。这里会作为任务主需求传给后端，用于生成关键词、判断线索和组织日报。</div>
-
-          <label for="keyword">种子词（可选）</label>
-          <input id="keyword" placeholder="例如：AI客服怎么做, 客服外包太贵, 餐饮加盟避坑, CRM试用" />
-
+          <label for="offeringId">研究模式与服务</label>
+          <select id="offeringId" onchange="changeOffering()"><option value="agent_custom_development">智能体定制开发 · 寻找真实委托需求</option><option value="general">通用关键词研究</option></select>
+          <div id="offeringContext" class="hint">当前服务：智能体定制开发。寻找买方委托、外包交付和询价的原文证据，学习讨论、工具使用和服务商宣传分开查看。</div>
+          <label for="keyword">种子关键词 <span class="field-required">*</span></label>
+          <textarea id="keyword" required placeholder="多个关键词用逗号或换行分隔">智能体</textarea>
+          <label for="demandDescription">搜索目标（可编辑）</label>
+          <textarea id="demandDescription" placeholder="说明希望寻找的真实需求与排除范围">寻找正在寻求他人提供智能体定制开发、外包交付或报价的真实需求；排除仅学习、求教程、工具使用和服务商宣传。</textarea>
+          <label for="excludeKeywords">排除条件（可选）</label><input id="excludeKeywords" placeholder="例如：招聘、课程广告（逗号分隔）" />
+          <div class="field-help">系统只在确认前扩词。执行使用你最终确认的关键词与范围。</div>
           <div class="row">
             <div>
               <label for="industry">行业</label>
@@ -509,8 +529,8 @@
         <div>
           <div class="row">
             <div>
-              <label for="count">单轮笔记数</label>
-              <input id="count" type="number" min="1" max="20" value="8" />
+              <label for="count">全任务笔记上限</label>
+              <input id="count" type="number" min="1" step="1" value="20" />
             </div>
             <div>
               <label for="minScore">线索阈值</label>
@@ -518,12 +538,10 @@
             </div>
           </div>
 
-          <label for="businessDirection">产品/服务匹配范围</label>
-          <select id="businessDirection">
-            <option value="cloud_ai">开放需求获客（默认）</option>
-          </select>
-          <div id="businessDirectionHelp" class="field-help">影响 Agent 的产品匹配倾向；具体是否保留仍以需求描述、公开证据和 QA 为准。</div>
-
+          <div class="row"><div><label for="maxKeywords">搜索词上限</label><input id="maxKeywords" type="number" min="1" step="1" value="6" /></div><div><label for="maxPagesPerKeyword">每词搜索页数</label><input id="maxPagesPerKeyword" type="number" min="1" step="1" value="3" /></div></div>
+          <div class="row"><div><label for="maxCommentsPerNote">每篇评论上限</label><input id="maxCommentsPerNote" type="number" min="1" step="1" value="20" /></div><div><label for="maxCommentsTotal">全任务评论上限</label><input id="maxCommentsTotal" type="number" min="1" step="1" value="200" /></div></div>
+          <label for="sort">平台搜索排序</label><select id="sort"><option value="general">综合</option><option value="latest">最新</option><option value="popular">最多点赞</option></select>
+          <div class="field-help">数量均可修改。全任务计数跨关键词累计；先达到的上限生效，平台能力限制另行说明。</div>
           <label>采集平台</label>
           <div class="row">
             <label class="checks"><input id="platformXhs" type="checkbox" checked />小红书</label>
@@ -544,7 +562,7 @@
             <div>
               <label for="timeFilter">时效</label>
               <select id="timeFilter">
-                <option value="all">全部</option>
+                <option value="all">全部</option><option value="day">近 1 天</option><option value="week">近 1 周</option>
                 <option value="month">近 1 个月</option>
                 <option value="quarter">近 3 个月</option>
                 <option value="year">近 1 年</option>
@@ -554,42 +572,51 @@
 
           <label>采集延迟（秒）</label>
           <div class="row">
-            <input id="delayMin" type="number" min="0" max="120" value="7" />
-            <input id="delayMax" type="number" min="0" max="120" value="60" />
+            <input id="delayMin" type="number" min="0" step="0.1" value="7" />
+            <input id="delayMax" type="number" min="0" step="0.1" value="60" />
           </div>
 
-          <label class="checks"><input id="readDetail" type="checkbox" checked />读取笔记详情</label>
+          <label class="checks"><input id="readDetail" type="checkbox" checked />读取笔记详情（含图片识别）</label>
           <label class="checks"><input id="scanLeads" type="checkbox" checked />扫描评论识别潜在线索</label>
 
           <div class="hint">
             <label class="checks" style="margin-top:0;"><input id="batchMode" type="checkbox" />启用后台多轮扫描</label>
-            <div id="batchFields" style="display:none;">
+            <div id="batchFields" style="display:none;"><p class="small">每轮每词读取一页；实际轮次不超过每词总页数。笔记、评论及每词页数上限对整个任务累计生效。</p>
               <div class="row">
                 <div>
                   <label for="batchRounds">轮次</label>
-                  <input id="batchRounds" type="number" min="1" max="10" value="3" />
+                  <input id="batchRounds" type="number" min="1" step="1" value="3" />
                 </div>
                 <div>
                   <label>轮间隔（分钟）</label>
                   <div class="row">
-                    <input id="intervalMin" type="number" min="1" max="180" value="30" />
-                    <input id="intervalMax" type="number" min="1" max="180" value="60" />
+                    <input id="intervalMin" type="number" min="1" step="1" value="30" />
+                    <input id="intervalMax" type="number" min="1" step="1" value="60" />
                   </div>
                 </div>
               </div>
             </div>
           </div>
 
-          <button id="searchBtn">开始扫描线索</button>
+          <div class="btn-row"><button id="searchBtn">生成搜索计划 →</button><button class="btn-secondary" onclick="saveTaskDefaults()">保存为默认配置</button><button class="btn-secondary" onclick="saveTaskTemplate()">保存任务模板</button></div><label for="taskTemplate">任务模板</label><select id="taskTemplate" onchange="loadTaskTemplate()"><option value="">选择模板</option></select>
           <button id="stopBtn" class="btn-stop">停止后台任务</button>
         </div>
       </div>
 
       <div class="hint">
-        <b>合规边界：</b>采集分析阶段仅执行公开内容搜索、详情和评论读取。遇到验证码、风控、登录过期会停止任务；关注和抖音私信仅在开启设置后逐条手动确认。
+        <b>合规边界：</b>采集分析阶段仅执行公开内容搜索、详情和评论读取。遇到验证码、风控、登录过期会停止任务；关注、评论、回复和私信均先核对账号、目标与正文，再逐条确认。
       </div>
     </section>
 
+    <section id="planPanel" class="card panel" style="display:none;">
+      <h2>确认搜索计划</h2><p id="planOrigin" class="small"></p>
+      <div id="planOffering" class="hint"></div>
+      <label for="planKeywords">实际执行关键词（每行一个，可编辑）</label><textarea id="planKeywords" style="min-height:140px;"></textarea>
+      <div id="planReasons" class="small" style="white-space:pre-wrap;"></div><div id="planWarnings" class="hint"></div>
+      <label for="planGoal">搜索目标</label><textarea id="planGoal"></textarea><label for="planExclusions">排除条件</label><input id="planExclusions" />
+      <p class="small">下方确认将使用本计划及上方当前采集参数；执行中保持不变。修改服务或种子词后请重新分析。</p>
+      <div id="planLimitSummary" class="hint"></div><button id="confirmSearchBtn" onclick="startConfirmedSearch()">确认并搜索</button>
+    </section>
     <section class="results">
       <div id="taskPanel" class="card task-panel">
         <div class="task-head">
@@ -602,22 +629,27 @@
             <button id="panelStopBtn" class="btn-stop" onclick="stopBatch()">停止任务</button>
           </div>
         </div>
-        <div class="progress"><div id="taskProgressFill" class="progress-fill"></div></div>
+        <div id="taskProgressTrack" class="progress"><div id="taskProgressFill" class="progress-fill"></div></div>
         <div id="taskProgressText" class="small">暂无进度</div>
+        <div id="stageCoverage" class="hint" aria-live="polite"></div>
         <div id="taskEvents" class="timeline" style="margin-top:12px;"><div class="small">暂无任务日志</div></div>
       </div>
       <div id="output" class="card empty">
         <div>
           <p style="font-size:17px;font-weight:800;">线索雷达待启动</p>
-          <p>填写需求描述后开始扫描，系统将输出可跟进线索、日报、来源笔记和执行日志。</p>
+          <p>输入关键词并确认计划后开始扫描，系统将输出待审核线索、报告和来源笔记。</p>
         </div>
       </div>
     </section>
   </main>
 
+  <section id="outreachHistoryPanel" class="card panel history-bottom" style="display:none;">
+    <div class="section-title"><h2>触达动作记录</h2><button class="btn-secondary" onclick="loadOutreachHistory()">刷新动作</button></div>
+    <p class="small">已提交但回执不明的动作需要核实。查询不会再次执行。</p><div id="outreachHistoryList" class="small">暂无动作</div>
+  </section>
   <details id="taskHistory" class="card history-panel history-bottom" style="display:none;">
     <summary>
-      <span>历史任务</span>
+      <span>新版任务记录</span>
       <span id="historyCount" class="small">默认折叠</span>
     </summary>
     <div id="historyList" class="history-list"><div class="small">暂无历史任务</div></div>
@@ -626,19 +658,40 @@
   <script>
     const $ = (id) => document.getElementById(id);
     function displayText(value) {
-      return String(value ?? '')
-        .replaceAll('微闻云', '当前工作台')
-        .replaceAll('内部销售', '使用者')
-        .replaceAll('销售团队', '团队')
-        .replaceAll('销售人员', '使用者');
+      return String(value ?? '');
+    }
+    // Translate only system-owned display values. Source text and submitted
+    // plans always retain their original spelling and identifiers.
+    function systemText(value) { return window.DisplayText?.message(value) ?? displayText(value); }
+    function reportText(value, data = cachedData) {
+      const source = data || {}, snapshot = typeof matchingTaskSnapshot === 'function' ? matchingTaskSnapshot(source) : null;
+      const plans = [source.confirmedPlan, source.plan, snapshot?.confirmedPlan].filter(Boolean);
+      const terms = [source.keyword, source.seedKeyword, source.keywords, source.seedKeywords,
+        source.request?.keyword, source.payload?.keyword,
+        ...plans.flatMap(plan => [plan.keywords, plan.seedKeywords, plan.seedKeyword])];
+      if (!data) terms.push($('keyword')?.value);
+      const preserved = [...new Set(terms.flatMap(term => Array.isArray(term) ? term : String(term ?? '').split(/[,，\n;；]+/)).map(term => String(term).trim()).filter(Boolean))];
+      return window.DisplayText?.report?.(value, preserved) ?? displayText(value);
+    }
+    function systemCode(value, fallback = '未记录') { return window.DisplayText?.code(value, fallback) ?? (/[\u3400-\u9fff]/.test(String(value || '')) ? String(value) : fallback); }
+    function systemStage(value) { return window.DisplayText?.stage(value) ?? ({ search:'搜索采集', relevance:'相关性研判', details:'笔记详情', comments:'评论读取', lead_signal:'需求识别', qa:'质量核验', report:'报告生成' })[value] ?? systemCode(value, '阶段未记录'); }
+    function priorityLabel(value) { return ({A:'优先',B:'常规',C:'较低',D:'低'})[value] || systemCode(value, '未分级'); }
+    function technicalDetails(value) {
+      const raw = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+      return raw ? `<details class="system-technical-details"><summary>技术详情</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere;">${esc(raw)}</pre></details>` : '';
+    }
+    function setSystemMessage(target, message, prefix = '') {
+      const element = typeof target === 'string' ? $(target) : target;
+      if (!element) return;
+      const translated = systemText(message);
+      element.textContent = prefix + translated;
+      if (translated !== String(message ?? '')) element.insertAdjacentHTML?.('beforeend', technicalDetails(message));
     }
     const esc = (s) => displayText(s).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
     const fmt = (n) => Number(n || 0).toLocaleString('zh-CN');
     let cachedData = null;
     let pollTimer = null;
-    let xhsLoginPollTimer = null;
-    let douyinLoginPollTimer = null;
-    let currentTaskId = localStorage.getItem('currentTaskId') || '';
+    let currentTaskId = localStorage.getItem('keywordWorkbenchTaskId') || '';
     let lastTaskEvents = [];
     let workbenchConfig = { xhs: { enable_follow_actions: false }, douyin: { enable_follow_actions: false, enable_dm_actions: false }, platforms: { enabled: ['xhs'] } };
     let currentDraftLeadIndex = null;
@@ -646,24 +699,14 @@
       valid_lead: '有效线索',
       invalid_lead: '误判线索',
       missed_lead: '漏识别线索',
-      wrong_product: '产品匹配不准',
+      irrelevant: '相关性判断错误',
+      wrong_evidence: '证据错误',
+      wrong_classification: '需求分类错误',
       bad_outreach: '跟进话术不合适',
       other: '其他'
     };
 
-    function wireButtonFeedback() {
-      document.addEventListener('pointerdown', event => {
-        const button = event.target.closest('button');
-        if (!button || button.disabled) return;
-        button.classList.add('is-pressing');
-      });
-      ['pointerup', 'pointercancel', 'pointerleave'].forEach(type => {
-        document.addEventListener(type, event => {
-          const button = event.target.closest('button');
-          if (button) button.classList.remove('is-pressing');
-        });
-      });
-    }
+
 
     function apiBase() {
       return location.protocol === 'file:' ? 'http://127.0.0.1:8765' : '';
@@ -677,20 +720,15 @@
       if (!cachedData) renderPlaceholderResults();
     }
 
-    async function bootSales() {
-      showSalesApp();
-      await loadConfig();
-      await restoreLastTask();
-    }
-
     function setStatus(text, icon = '') {
+      $('status').dataset.taskStatus = '';
       const tone = icon === '✅' ? 'success'
         : icon === '⏳' ? 'running'
         : icon === '⚠️' ? 'warning'
         : icon === '❌' ? 'error'
         : 'idle';
       $('status').className = `card status status-${tone}`;
-      $('status').innerHTML = `<span class="status-dot" aria-hidden="true"></span><span>${esc(text)}</span>`;
+      $('status').innerHTML = `<span class="status-dot" aria-hidden="true"></span><span>${esc(systemText(text))}${systemText(text) !== String(text ?? '') ? technicalDetails(text) : ''}</span>`;
     }
 
     function formatTime(ts) {
@@ -699,7 +737,7 @@
     }
 
     function taskStatusLabel(status) {
-      return { running:'运行中', completed:'已完成', failed:'失败', stopped:'已停止', interrupted:'已中断' }[status] || status || '未知';
+      return window.DisplayText?.status(status) ?? ({ running:'运行中', completed:'已完成', partial:'部分完成', needs_action:'需人工处理', failed:'失败', stopped:'已停止', interrupted:'已中断' }[status] || systemCode(status, '状态未记录'));
     }
 
     function feedbackTypeFromValue(value) {
@@ -707,7 +745,7 @@
       if (FEEDBACK_LABELS[text]) return text;
       if (['有效', '已跟进', '已成交'].includes(text)) return 'valid_lead';
       if (text === '无效') return 'invalid_lead';
-      if (text === '产品不准') return 'wrong_product';
+      if (text === '相关性错误') return 'irrelevant';
       if (text === '话术不准') return 'bad_outreach';
       return 'other';
     }
@@ -720,36 +758,23 @@
         .join('');
     }
 
-    function businessDirectionOptions(selected) {
-      const options = workbenchConfig?.businessDirections || [];
-      const current = selected || workbenchConfig?.defaultBusinessDirection || workbenchConfig?.sales?.default_business_direction || 'cloud_ai';
-      return options.map(item => `<option value="${esc(item.value)}" ${item.value === current ? 'selected' : ''}>${esc(item.label)}</option>`).join('');
-    }
-
-    function updateBusinessDirectionHelp() {
-      const current = $('businessDirection')?.value || 'cloud_ai';
-      const item = (workbenchConfig?.businessDirections || []).find(option => option.value === current);
-      const keywords = (item?.keywords || []).slice(0, 5).join(' / ');
-      const text = [item?.description || '影响 Agent 的产品匹配倾向；具体是否保留仍以需求描述、公开证据和 QA 为准。', keywords ? `参考词：${keywords}` : ''].filter(Boolean).join(' ');
-      if ($('businessDirectionHelp')) $('businessDirectionHelp').textContent = text;
-    }
-
     function qaStatusLabel(status) {
       return {
-        approved: 'QA 可触达',
-        needs_review: 'QA 需复审',
-        rejected: 'QA 已拒绝',
-        pending: 'QA 待检查'
-      }[status || ''] || 'QA 未标记';
+        approved: '模型质检通过',
+        needs_review: '质检需复审',
+        rejected: '质检未通过',
+        pending: '质检待检查'
+      }[status || ''] || '质检未标记';
     }
 
     function renderEventList(events) {
-      return (events || []).length
-        ? events.map(e => `
+      const visibleEvents = (events || []).filter(event => !['Model Usage', '模型用量'].includes(event.agent));
+      return visibleEvents.length
+        ? visibleEvents.map(e => `
             <div class="event event-${esc(e.level || 'info')}">
               <div class="time">${formatTime(e.createdAt)}</div>
-              <div class="agent">${esc(e.agent || '-')}</div>
-              <div class="msg">${esc(e.message)}</div>
+              <div class="agent">${esc(({info:'信息',warning:'警告',warn:'警告',error:'错误',debug:'调试'})[e.level || 'info'] || systemCode(e.level, '记录'))} · ${esc(window.DisplayText?.agent(e.agent) ?? systemCode(e.agent, '任务执行'))}</div>
+              <div class="msg">${esc(systemText(e.message))}${systemText(e.message) !== String(e.message ?? '') ? technicalDetails(e.message) : ''}</div>
             </div>
           `).join('')
         : '<div class="small">暂无任务日志</div>';
@@ -761,12 +786,17 @@
     }
 
     function switchResultTab(tab) {
+      if (!['leads', 'report', 'notes'].includes(tab)) tab = 'leads';
       document.querySelectorAll('[data-result-tab]').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.resultTab === tab);
+        btn.setAttribute?.('role', 'tab');
+        btn.setAttribute?.('aria-selected', String(btn.dataset.resultTab === tab));
+        btn.setAttribute?.('tabindex', btn.dataset.resultTab === tab ? '0' : '-1');
       });
       document.querySelectorAll('[data-result-panel]').forEach(panel => {
         panel.hidden = panel.dataset.resultPanel !== tab;
       });
+      window.WorkbenchWorkspace?.tabChanged(tab);
     }
 
     function geoStatusLabel(status) {
@@ -801,7 +831,7 @@
     }
 
     function platformLabel(platform) {
-      return platform === 'douyin' ? '抖音' : '小红书';
+      return window.DisplayText?.platform(platform) ?? ({douyin:'抖音',xhs:'小红书'}[platform] || '平台未记录');
     }
 
     function hasFollowTarget(lead) {
@@ -835,197 +865,13 @@
       ).trim();
     }
 
-    async function postJson(path, body) {
-      const res = await fetch(`${apiBase()}${path}`, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body || {})
-      });
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.error || '请求失败');
-      return json.data;
-    }
-
-    async function getCurrentXhsUserText() {
-      try {
-        const data = await postJson('/api/xhs_login/status', {});
-        const user = data?.xhs?.data?.user || {};
-        if (data?.xhs?.data?.authenticated) {
-          const name = user.nickname || user.nick_name || user.name || '已登录账号';
-          const id = user.user_id || user.id || '';
-          return `${name}${id ? `（${id}）` : ''}`;
-        }
-        return data?.xhsError ? `未确认：${data.xhsError}` : '未确认登录态';
-      } catch (err) {
-        return `未确认：${err.message || err}`;
-      }
-    }
-
-    async function getCurrentDouyinUserText() {
-      try {
-        const data = await postJson('/api/douyin_login/status', {});
-        if (data?.douyin?.ok) return '抖音登录态已确认';
-        return data?.douyinError ? `未确认：${data.douyinError}` : '未确认登录态';
-      } catch (err) {
-        return `未确认：${err.message || err}`;
-      }
-    }
-
-    async function confirmFollowLead(index) {
-      const lead = cachedData?.leads?.leads?.[index];
-      if (!lead) return alert('找不到该线索数据');
-      const platform = leadPlatform(lead);
-      const label = platformLabel(platform);
-      if (!platformFollowEnabled(lead)) {
-        return alert(`${label}手动关注功能未开启。请先在 Harness 控制台系统设置中开启对应平台关注。`);
-      }
-      if (!hasFollowTarget(lead)) return alert(`该线索没有可用的${label}用户 ID，无法关注。`);
-      if (lead.qa_status === 'rejected') return alert('该线索已被 QA 拒绝，不能执行触达动作。');
-      const accountText = platform === 'douyin' ? await getCurrentDouyinUserText() : await getCurrentXhsUserText();
-      const visibleUserId = lead.user_id || leadTargetUserId(lead) || '-';
-      const ok = confirm(
-        [
-          `即将执行一次${label}关注动作，请确认：`,
-          '',
-          `当前登录账号：${accountText}`,
-          `目标对象：${lead.nickname || '未知用户'}（${visibleUserId}）`,
-          `来源线索：${lead.demand_summary || lead.evidence || lead.lead_id || '-'}`,
-          lead.qa_status === 'needs_review' ? `复审提示：${lead.review_required_reason || '该线索需要人工复核后再触达。'}` : '',
-          '',
-          '该动作只会关注这一条线索对象，不会批量关注，也不会自动发送其他消息。'
-        ].filter(line => line !== '').join('\n')
-      );
-      if (!ok) return;
-      const statusEl = $(`outreachStatus-${index}`);
-      if (statusEl) {
-        statusEl.textContent = '正在执行关注...';
-        statusEl.style.color = 'var(--muted)';
-      }
-      try {
-        const data = await postJson('/api/leads/follow', { leadId: lead.lead_id });
-        lead.follow_status = 'follow_success';
-        if (statusEl) {
-          statusEl.textContent = `已关注：${data.nickname || lead.nickname || data.userId || '目标用户'}`;
-          statusEl.style.color = 'var(--green)';
-        }
-        setStatus('已完成单条手动关注，可在 Harness 审计日志中查看 outreach 记录。', '✅');
-      } catch (err) {
-        if (statusEl) {
-          statusEl.textContent = `关注失败：${err.message || err}`;
-          statusEl.style.color = 'var(--red)';
-        }
-        alert('关注失败：' + (err.message || err));
-      }
-    }
-
-    function openDmDraft(index) {
-      const lead = cachedData?.leads?.leads?.[index];
-      if (!lead) return alert('找不到该线索数据');
-      if (lead.qa_status === 'rejected') return alert('该线索已被 QA 拒绝，不能生成触达动作。');
-      currentDraftLeadIndex = index;
-      const platform = leadPlatform(lead);
-      const label = platformLabel(platform);
-      $('dmDraftText').value = outreachDraft(lead);
-      $('dmDraftMeta').textContent = `${lead.nickname || '未知用户'} · ${lead.user_id || leadTargetUserId(lead) || '无用户 ID'} · ${lead.demand_summary || lead.evidence || ''}`;
-      $('dmDraftStatus').textContent = platform === 'douyin'
-        ? '内容可编辑。开启抖音私信后，可逐条确认发送；也可以只复制话术。'
-        : '草稿可编辑。复制后请在小红书页面中人工确认发送。';
-      $('dmDraftStatus').style.color = 'var(--muted)';
-      $('sendDmBtn').style.display = canSendDouyinDm(lead) ? 'inline-flex' : 'none';
-      $('dmDraftModal').style.display = 'flex';
-    }
-
-    function closeDmDraft() {
-      $('dmDraftModal').style.display = 'none';
-      currentDraftLeadIndex = null;
-    }
-
-    function openLeadProfileFromDraft() {
-      const lead = cachedData?.leads?.leads?.[currentDraftLeadIndex];
-      const url = leadProfileUrl(lead);
-      if (!url) return alert('该线索没有可打开的对象主页或来源链接。');
-      window.open(url, '_blank', 'noopener');
-    }
-
-    async function copyDmDraft() {
-      const lead = cachedData?.leads?.leads?.[currentDraftLeadIndex];
-      if (!lead) return alert('找不到该线索数据');
-      const text = $('dmDraftText').value.trim();
-      if (!text) return alert('草稿内容不能为空。');
-      try {
-        if (navigator.clipboard?.writeText) {
-          await navigator.clipboard.writeText(text);
-        } else {
-          $('dmDraftText').focus();
-          $('dmDraftText').select();
-          document.execCommand('copy');
-        }
-        $('dmDraftStatus').textContent = `已复制草稿。${leadPlatform(lead) === 'douyin' ? '未执行发送动作。' : '系统不会自动发送私信，请在小红书页面中人工确认。'}`;
-        $('dmDraftStatus').style.color = 'var(--green)';
-        const statusEl = $(`outreachStatus-${currentDraftLeadIndex}`);
-        if (statusEl) {
-          statusEl.textContent = '已复制私信草稿';
-          statusEl.style.color = 'var(--green)';
-        }
-        try {
-          await postJson('/api/leads/dm-draft', { leadId: lead.lead_id, draft: text });
-        } catch (auditErr) {
-          console.warn('私信草稿审计失败', auditErr);
-        }
-      } catch (err) {
-        $('dmDraftStatus').textContent = `复制失败：${err.message || err}`;
-        $('dmDraftStatus').style.color = 'var(--red)';
-      }
-    }
-
-    async function sendDmDraft() {
-      const lead = cachedData?.leads?.leads?.[currentDraftLeadIndex];
-      if (!lead) return alert('找不到该线索数据');
-      if (!canSendDouyinDm(lead)) return alert('抖音私信发送未开启，或该线索缺少可用抖音用户 ID。');
-      if (lead.qa_status === 'rejected') return alert('该线索已被 QA 拒绝，不能发送私信。');
-      const text = $('dmDraftText').value.trim();
-      if (!text) return alert('私信内容不能为空。');
-      const ok = confirm([
-        '即将发送一条抖音私信，请确认：',
-        '',
-        `目标对象：${lead.nickname || '未知用户'}（${lead.user_id || leadTargetUserId(lead) || '-'}）`,
-        `消息内容：${text}`,
-        '',
-        lead.qa_status === 'needs_review' ? `复审提示：${lead.review_required_reason || '该线索需要人工复核后再触达。'}` : '',
-        '',
-        '该动作只会发送这一条私信，不会批量发送。'
-      ].filter(line => line !== '').join('\n'));
-      if (!ok) return;
-      $('dmDraftStatus').textContent = '正在发送抖音私信...';
-      $('dmDraftStatus').style.color = 'var(--muted)';
-      const statusEl = $(`outreachStatus-${currentDraftLeadIndex}`);
-      if (statusEl) {
-        statusEl.textContent = '正在发送抖音私信...';
-        statusEl.style.color = 'var(--muted)';
-      }
-      try {
-        await postJson('/api/leads/send-dm', { leadId: lead.lead_id, message: text });
-        $('dmDraftStatus').textContent = '抖音私信已发送，可在 Harness 审计日志查看记录。';
-        $('dmDraftStatus').style.color = 'var(--green)';
-        if (statusEl) {
-          statusEl.textContent = '抖音私信发送成功';
-          statusEl.style.color = 'var(--green)';
-        }
-        setStatus('已完成单条抖音私信发送。', '✅');
-      } catch (err) {
-        $('dmDraftStatus').textContent = `发送失败：${err.message || err}`;
-        $('dmDraftStatus').style.color = 'var(--red)';
-        if (statusEl) {
-          statusEl.textContent = `私信失败：${err.message || err}`;
-          statusEl.style.color = 'var(--red)';
-        }
-      }
+    function postJson(path, body = {}) {
+      return WorkspaceData.requestJson(`${apiBase()}${path}`, { method: 'POST', body, fetcher: apiFetch });
     }
 
     function renderPlaceholderResults(
       title = '线索雷达待启动',
-      detail = '填写需求描述后开始扫描，系统将输出可跟进线索、日报、来源笔记和执行日志。'
+      detail = '输入关键词并确认计划后开始扫描，系统将输出待审核线索、报告和来源笔记。'
     ) {
       $('output').className = 'card result-shell';
       $('output').innerHTML = `
@@ -1033,7 +879,6 @@
           <button type="button" class="tab-btn active" data-result-tab="leads" onclick="switchResultTab('leads')">线索</button>
           <button type="button" class="tab-btn" data-result-tab="report" onclick="switchResultTab('report')">日报</button>
           <button type="button" class="tab-btn" data-result-tab="notes" onclick="switchResultTab('notes')">来源笔记</button>
-          <button type="button" class="tab-btn" data-result-tab="logs" onclick="switchResultTab('logs')">执行日志</button>
         </div>
         <div class="tab-panel" data-result-panel="leads">
           <div class="empty" style="min-height:180px;">
@@ -1049,19 +894,16 @@
         <div class="tab-panel" data-result-panel="notes" hidden>
           <div class="empty" style="min-height:180px;">任务完成后显示来源笔记。</div>
         </div>
-        <div class="tab-panel" data-result-panel="logs" hidden>
-          <div id="resultTaskEvents" class="timeline">${renderEventList(lastTaskEvents)}</div>
-        </div>
       `;
     }
 
     function getDemandDescription(data = cachedData) {
       return String(
-        data?.demandDescription ||
+        data?.searchGoal || data?.confirmedPlan?.searchGoal || data?.plan?.searchGoal || matchingTaskSnapshot(data)?.confirmedPlan?.searchGoal || data?.demandDescription ||
         data?.demand_description ||
         data?.request?.demandDescription ||
         data?.payload?.demandDescription ||
-        $('demandDescription')?.value?.trim() ||
+        (!data ? $('demandDescription')?.value?.trim() : '') ||
         ''
       ).trim();
     }
@@ -1073,20 +915,26 @@
 
     function renderTaskPanel(data) {
       if (!data || data.hasTask === false) return;
+      currentTaskSnapshot = data;
+      syncTaskStatus(data);
       $('taskPanel').style.display = 'block';
       $('taskIdBadge').textContent = `#${data.taskId || data.id} · ${taskStatusLabel(data.status)}`;
       const progress = data.progress || {};
+      const execution = window.TaskInsights?.execution(data);
+      const business = window.TaskInsights?.workbenchStatus(data);
       const percent = Math.max(0, Math.min(100, Number(progress.percent || 0)));
+      $('taskProgressTrack').style.display = execution?.terminal ? 'none' : '';
       $('taskProgressFill').style.width = `${percent}%`;
       const roundText = data.totalRounds ? `第 ${data.currentRound || 0}/${data.totalRounds} 轮 · ` : '';
-      $('taskMeta').textContent = `${roundText}${data.statusText || '等待任务更新'}${data.errorText ? ' · ' + data.errorText : ''}`;
-      $('taskProgressText').textContent = `阶段：${progress.stage || '-'} · 进度：${percent}% · 更新时间：${formatTime(data.updatedAt)}`;
-      const events = data.events || [];
-      lastTaskEvents = events;
-      $('taskEvents').innerHTML = renderEventList(events);
-      syncResultTaskEvents(events);
+      $('taskMeta').textContent = `${roundText}${business?.detail || '等待任务更新'}`;
+      $('taskProgressText').textContent = `${execution?.terminal ? '流程已结束' : `${window.TaskInsights?.businessStageLabel(progress.stage) || '处理任务'} · 进度：${percent}%`} · 更新时间：${formatTime(data.updatedAt)}`;
+      $('stageCoverage').innerHTML = window.TaskInsights?.workbenchDetailsHtml(data) || '';
+      lastTaskEvents = data.events || [];
+      $('taskEvents').innerHTML = '';
+      $('taskEvents').hidden = true;
       $('stopBtn').style.display = data.isRunning ? 'block' : 'none';
       $('panelStopBtn').style.display = data.isRunning ? 'inline-block' : 'none';
+      window.WorkbenchWorkspace?.taskUpdated(data);
     }
 
     function needsXhsLoginAssist(text) {
@@ -1094,6 +942,7 @@
     }
 
     function renderHistory(tasks) {
+      window.WorkbenchWorkspace?.historyUpdated(tasks);
       $('taskHistory').style.display = 'block';
       if ($('historyCount')) {
         $('historyCount').textContent = `${fmt((tasks || []).length)} 条历史`;
@@ -1104,7 +953,7 @@
               <div>
                 <b>#${fmt(t.id)} · ${esc(taskStatusLabel(t.status))}</b>
                 <div class="small">${esc(taskTitle(t))}</div>
-                <div class="small">种子词：${esc(t.keyword || '无')} · ${esc(t.mode || 'single')} · 笔记 ${fmt(t.notesCount)} · 线索 ${fmt(t.leadsCount)} · 更新 ${formatTime(t.updatedAt)}</div>
+                <div class="small">种子词：${esc(t.keyword || '无')} · ${esc(({single:'单轮采集',batch:'批量采集'})[t.mode || 'single'] || systemCode(t.mode, '采集方式未记录'))} · 笔记 ${fmt(t.notesCount)} · 线索 ${fmt(t.leadsCount)} · 更新 ${formatTime(t.updatedAt)}</div>
               </div>
               <button onclick="viewTask(${Number(t.id)})">查看</button>
             </div>
@@ -1112,53 +961,20 @@
         : '<div class="small">暂无历史任务</div>';
     }
 
-    function payload() {
-      const demandDescription = $('demandDescription').value.trim();
-      if (!demandDescription) {
-        $('demandDescription').focus();
-        throw new Error('请先填写需求描述。');
-      }
-      const data = {
-        demandDescription,
-        platforms: [
-          $('platformXhs')?.checked ? 'xhs' : '',
-          $('platformDouyin')?.checked ? 'douyin' : ''
-        ].filter(Boolean),
-        businessDirection: $('businessDirection')?.value || 'cloud_ai',
-        industry: $('industry').value.trim(),
-        region: $('region').value.trim(),
-        keyword: $('keyword').value.trim(),
-        count: Number($('count').value || 8),
-        minScore: Number($('minScore').value || 60),
-        metric: $('metric').value,
-        timeFilter: $('timeFilter').value,
-        delayMin: Number($('delayMin').value || 7),
-        delayMax: Number($('delayMax').value || 60),
-        readDetail: $('readDetail').checked,
-        scanLeads: $('scanLeads').checked
-      };
-      if (!data.platforms.length) {
-        throw new Error('请至少选择一个采集平台。');
-      }
-      if ($('batchMode').checked) {
-        data.rounds = Number($('batchRounds').value || 3);
-        data.intervalMin = Number($('intervalMin').value || 30);
-        data.intervalMax = Number($('intervalMax').value || 60);
-      }
-      return data;
-    }
-
     function render(data) {
+      if (window.WorkbenchWorkspace?.shouldDeferResults(data)) return;
+      const formState = captureResultFormState();
       cachedData = data;
       const demandDescription = getDemandDescription(data);
-      const seedKeyword = data.keyword || data.request?.keyword || data.payload?.keyword || $('keyword')?.value?.trim() || '';
+      const seedKeyword = data.keyword || data.confirmedPlan?.seedKeywords?.join('、') || data.request?.keyword || data.payload?.keyword || '';
       if (cachedData && demandDescription) cachedData.demandDescription = demandDescription;
       if (cachedData && !cachedData.keyword) cachedData.keyword = seedKeyword;
 
       const notes = data.notes || [];
       const leads = data.leads?.leads || [];
-      const aLeads = leads.filter(l => l.priority === 'A').length;
-      const productCount = (data.leads?.productDistribution || data.report?.productDistribution || []).length;
+      const focused = resultOfferingId(data) === 'agent_custom_development';
+      initializeLeadFilter(data);
+      const visibleLeads = filteredLeadEntries(data);
       const noteRows = notes.map(n => `
         <tr>
           <td><span class="pill">#${n.rank || '-'}</span></td>
@@ -1169,11 +985,11 @@
           <td class="num">${fmt(n.collected)}</td>
           <td class="num">${fmt(n.comments)}</td>
           <td class="num">${fmt(n.engagement)}</td>
-          <td><a href="${esc(n.url)}" target="_blank" rel="noopener">打开 ↗</a></td>
+          <td><a href="${esc(safeUrl(n.url))}" target="_blank" rel="noopener">打开 ↗</a></td>
         </tr>
       `).join('');
 
-      const leadRows = leads.map((l, idx) => {
+      const leadRows = visibleLeads.map(({ lead: l, index: idx }) => {
         const priority = l.priority || '-';
         const summary = l.demand_summary || l.evidence || '未提炼需求';
         const sourceTitle = (l.note_title || '来源笔记').slice(0, 28);
@@ -1181,52 +997,65 @@
         const geoLabel = geoStatusLabel(l.geo_status);
         const platform = leadPlatform(l);
         const platformName = platformLabel(platform);
-        const followEnabled = platformFollowEnabled(l);
-        const followTargetAvailable = hasFollowTarget(l);
-        const followLabel = followEnabled ? (followTargetAvailable ? '关注' : '无用户ID') : '关注未开启';
         const qaStatus = l.qa_status || 'pending';
-        const qaBlocksAction = qaStatus === 'rejected';
-        const followDisabled = !followEnabled || !followTargetAvailable || qaBlocksAction ? 'disabled' : '';
-        const dmDisabled = qaBlocksAction ? 'disabled' : '';
-        const dmLabel = platform === 'douyin' && workbenchConfig?.douyin?.enable_dm_actions ? '抖音私信' : '私信草稿';
-        const outreachHint = platform === 'douyin'
-          ? (workbenchConfig?.douyin?.enable_dm_actions ? '关注和私信均需逐条人工确认。' : '关注需逐条确认；抖音私信发送未开启。')
-          : (followEnabled ? '触达动作需逐条人工确认；私信只生成草稿。' : '关注功能默认关闭；私信只生成草稿。');
+        const followDisabled = hasFollowTarget(l) ? '' : 'disabled';
+        const followLabel = hasFollowTarget(l) ? '关注' : '无用户编号';
+        const outreachHint = '先核对账号与目标，再逐条确认；结果待核实时不要重发。';
         const reviewReason = l.review_required_reason || (l.qa_issues || []).map(issue => issue.message).filter(Boolean).join('；');
+        const parentNote = l.source_comment?.note;
+        const imageEvidence = parentNote?.image_evidence || [];
+        const imageStatusLabel = {recognized:'文字已识别',no_text:'已查看，未见文字',partial:'部分内容待核验',unreadable:'无法识别',failed:'读取或识别失败'};
         return `
-          <article class="lead-card">
+          <article class="lead-card" data-lead-index="${idx}">
             <div class="lead-card-head">
               <div class="lead-score">
-                <b><span class="pill p${esc(priority)}">${esc(priority)} / ${fmt(l.score)}</span></b>
-                <div class="small">${esc(l.stage || '未分阶段')}</div>
+                <b><span class="pill p${esc(priority)}">${esc(priorityLabel(priority))} / ${fmt(l.score)} 分</span></b>
+                <div class="small">${esc(systemCode(l.stage, '需求阶段未记录'))}</div>
               </div>
               <div class="lead-main">
-                <h3>${esc(summary)}</h3>
+                <h3>${esc(redactExportText(summary))}</h3>
                 <div class="lead-meta">
                   <span>${esc(platformName)}</span>
                   <span>${esc(leadTypeLabel)}</span>
-                  <span>${esc(qaStatusLabel(qaStatus))}</span>
+                  ${qaStatus !== 'approved' ? '<span>判断依据待核验</span>' : ''}
                   <span>${esc(l.nickname || '未知用户')}</span>
-                  <span>ID: ${esc(l.user_id || '-')}</span>
+                  <span>用户编号：${esc(l.user_id || '-')}</span>
+                  ${l.phone || l.mobile ? `<span>电话：${esc(l.phone || l.mobile)}</span>` : ''}
+                  ${l.email ? `<span>邮箱：${esc(l.email)}</span>` : ''}
                   ${l.ip ? `<span>${esc(l.ip)}</span>` : ''}
                   ${geoLabel ? `<span>${esc(geoLabel)}</span>` : ''}
                 </div>
               </div>
-              <a class="lead-link" href="${esc(l.note_url)}" target="_blank" rel="noopener">${esc(sourceTitle)} ↗</a>
+              <a class="lead-link" href="${esc(safeUrl(l.note_url))}" target="_blank" rel="noopener">${esc(sourceTitle)} ↗</a>
             </div>
             <div class="lead-body">
               <div class="lead-block">
                 <b>原文证据</b>
-                <div class="evidence">${esc(l.evidence || '-')}</div>
+                <div class="evidence">${esc(redactExportText(l.evidence || '-'))}</div>
+                ${l.content && l.content !== l.evidence ? `<details class="small"><summary>完整来源内容</summary><div class="evidence">${esc(redactExportText(l.content))}</div></details>` : ''}
+                ${parentNote ? `<details class="small"><summary>父笔记与图片内容（${fmt(parentNote.images || 0)} 张图片）</summary>
+                  <p><b>${esc(parentNote.title || '来源笔记')}</b></p>
+                  <div class="evidence">${esc(parentNote.desc || '未提供文字正文')}</div>
+                  <p>标签：${esc((parentNote.tags || []).join(' / ') || '未提供')}</p>
+                  ${imageEvidence.map(image => `<div class="lead-block"><b>图片 ${fmt(image.index)} · ${esc(imageStatusLabel[image.status] || '待识别')}</b>
+                    <div class="evidence">${esc(image.text || '未取得可用图片文字')}</div>
+                    ${image.visual_description ? `<p>画面说明：${esc(image.visual_description)}</p>` : ''}
+                    ${image.error || image.uncertain_regions?.length ? `<p>${esc(image.error || '')} ${esc((image.uncertain_regions || []).join('；'))}</p>` : ''}
+                    ${image.url ? `<a href="${esc(safeUrl(image.url))}" target="_blank" rel="noopener noreferrer">查看原图 ↗</a>` : ''}</div>`).join('')}
+                  ${parentNote.content_gap ? `<p>${esc(parentNote.content_gap)}</p>` : ''}
+                  ${parentNote.images ? '<p>图片文字为模型识别结果，审核时请结合原图核对。</p>' : ''}
+                </details>` : ''}
               </div>
               <div class="lead-block">
-                <b>推荐产品</b>
-                <div>${esc(l.recommended_products || '-')}</div>
+                <b>需求判断</b>
+                <div>${esc(demandLabel(l.demand_category || l.category || l.classification))}</div>
                 <div class="small">${esc(l.reason || '')}</div>
+                ${focused || l.intent_role || l.service_fit ? `<div class="small"><b>意图角色：</b>${esc(intentRoleLabel(l.intent_role))} · <b>服务匹配：</b>${esc(serviceFitLabel(l.service_fit))}<br><b>需求来源：</b>${esc(demandOriginLabel(l.demand_origin))} · <b>资格：</b>${esc(isQualifiedLeadForDisplay(l) ? '初步符合需求条件，仍需人工确认' : '需求判断尚待核验')}<br><b>判断依据：</b>${esc(l.intent_reason || '未记录，需核对原文')}</div>` : ''}
               </div>
+              ${window.TaskInsights?.inquiryHtml(l) || ''}
               <div class="lead-block">
                 <b>首句话术</b>
-                <div class="copy">${esc(l.outreach_copy || '-')}</div>
+                <div class="copy">${esc(redactExportText(l.outreach_copy || '-'))}</div>
               </div>
               <div class="lead-block">
                 <b>风险提示</b>
@@ -1235,71 +1064,79 @@
             </div>
             <div class="touch-actions">
               <button type="button" class="btn-follow" ${followDisabled} onclick="confirmFollowLead(${idx})">${esc(followLabel)}</button>
-              <button type="button" class="btn-draft" ${dmDisabled} onclick="openDmDraft(${idx})">${esc(dmLabel)}</button>
+              <button type="button" class="btn-draft" onclick="openOutreach(${idx}, 'send_dm')">私信 / 草稿</button>
+              ${platform === 'xhs' ? `<button type="button" onclick="openOutreach(${idx}, 'comment')">发表评论</button><button type="button" ${l.comment_id ? '' : 'disabled'} onclick="openOutreach(${idx}, 'reply_comment')">回复评论</button>` : ''}
               <div id="outreachStatus-${idx}" class="small outreach-status">${esc(outreachHint)}</div>
+            </div>
+            <div class="lead-actions feedback-cell">
+              <label for="reviewStatus-${idx}">人工审核</label><select id="reviewStatus-${idx}">${reviewOptions(l.review?.status)}</select>
+              <textarea id="reviewNote-${idx}" placeholder="填写审核依据，例如需求是否真实、是否值得跟进">${esc(l.review?.note || '')}</textarea>
+              <button onclick="saveReview(${idx})">保存审核</button><button class="btn-secondary" onclick="viewReviewHistory(${idx})">审核记录</button><div id="reviewResult-${idx}" class="small">${esc(reviewLabel(l.review?.status))}</div>
             </div>
             <div class="lead-actions feedback-cell">
               <select id="feedbackType-${idx}">
                 ${feedbackOptions(l.feedback)}
               </select>
-              <textarea id="feedbackNote-${idx}" placeholder="补充说明，例如为什么有效、哪里误判、产品或话术哪里不准"></textarea>
+              <textarea id="feedbackNote-${idx}" placeholder="补充说明，例如为什么有效、哪里误判、证据或话术哪里不准"></textarea>
               <button type="button" onclick="saveFeedback(${idx})">提交反馈</button>
-              <div id="feedbackStatus-${idx}" class="small">${esc(l.feedback ? '已有人工作业记录：' + l.feedback : '未提交学习反馈')}</div>
+              <div id="feedbackStatus-${idx}" class="small">${esc(l.feedback ? '已有人工作业记录：' + (FEEDBACK_LABELS[l.feedback] || systemCode(l.feedback, '已记录反馈')) : '尚未反馈识别问题')}</div>
             </div>
           </article>
         `;
       }).join('');
 
       const report = data.report || {};
-      const insights = (report.insights || []).map(x => `<li>${esc(x)}</li>`).join('');
-      const actions = (report.recommended_actions || []).map(x => `<li>${esc(x)}</li>`).join('');
-      const risks = (report.risks || []).map(x => `<li>${esc(x)}</li>`).join('');
-      const distRows = (data.leads?.productDistribution || report.productDistribution || []).map(p => `<li>${esc(p.label)}：${fmt(p.count)} 条</li>`).join('');
-      const directionLabel = data.businessDirectionLabel || (workbenchConfig?.businessDirections || []).find(item => item.value === data.businessDirection)?.label || data.businessDirection || '未标记';
-
+      const insights = (report.insights || []).map(x => `<li>${esc(reportText(x, data))}</li>`).join('');
+      const actions = (report.recommended_actions || []).map(x => `<li>${esc(reportText(x, data))}</li>`).join('');
+      const risks = (report.risks || []).map(x => `<li>${esc(reportText(x, data))}</li>`).join('');
+      const dist = leads.reduce((acc, lead) => { const key = demandLabel(lead.demand_category || lead.category || lead.classification); acc[key] = (acc[key] || 0) + 1; return acc; }, {});
+      const distRows = Object.entries(dist).map(([label, count]) => `<li>${esc(label)}：${fmt(count)} 条</li>`).join('');
       $('output').className = 'card result-shell';
       $('output').innerHTML = `
-        <div class="kpis">
-          <div class="kpi"><b>${fmt(notes.length)}</b><span>相关笔记</span></div>
-          <div class="kpi"><b>${fmt(data.leads?.totalCommentsScanned || 0)}</b><span>扫描评论</span></div>
-          <div class="kpi"><b>${fmt(leads.length)}</b><span>达标线索</span></div>
-          <div class="kpi"><b style="color:var(--red)">${fmt(aLeads)}</b><span>A级线索</span></div>
-          <div class="kpi"><b>${fmt(productCount)}</b><span>产品方向</span></div>
+        <div class="wb-review-summary" aria-label="当前范围审核进度">
+          <div class="wb-review-counts">
+            <button type="button" id="wbReviewCount-pending" onclick="WorkbenchWorkspace.filterReviews('pending')">待你审核</button>
+            <button type="button" id="wbReviewCount-approved" onclick="WorkbenchWorkspace.filterReviews('approved')">已通过</button>
+            <button type="button" id="wbReviewCount-rejected" onclick="WorkbenchWorkspace.filterReviews('rejected')">已排除</button>
+          </div>
+          <button type="button" class="primary" id="wbStartReview" onclick="WorkbenchWorkspace.startReview()">开始审核</button>
+          <p id="wbReviewScope"></p>
         </div>
-        <div class="small">本次产品/服务匹配范围：${esc(directionLabel)}</div>
+        <div class="summary"><b>本任务服务：</b>${esc(offeringLabel(resultOfferingId(data)))}<br><b>搜索目标：</b>${esc(demandDescription || '历史任务未记录目标')}<br><b>采集范围：</b>${fmt(notes.length)} 篇笔记 · ${fmt(data.leads?.totalCommentsScanned || data.scannedCommentsCount || data.collectionSummary?.commentsCollected || 0)} 条评论</div>
+        <div class="small">先核对原文，再记录审核结论。导出按整个任务的审核范围选择，默认仅人工通过项，与列表筛选独立。</div><label for="exportScope">导出范围</label><select id="exportScope" onchange="changeExportScope(this.value)"><option value="approved">仅人工审核通过</option><option value="pending">待审核候选</option><option value="all">全部候选与相关内容（含未审核项）</option></select>
         <div class="tabs" role="tablist" aria-label="结果 tabs">
           <button type="button" class="tab-btn active" data-result-tab="leads" onclick="switchResultTab('leads')">线索</button>
           <button type="button" class="tab-btn" data-result-tab="report" onclick="switchResultTab('report')">日报</button>
           <button type="button" class="tab-btn" data-result-tab="notes" onclick="switchResultTab('notes')">来源笔记</button>
-          <button type="button" class="tab-btn" data-result-tab="logs" onclick="switchResultTab('logs')">执行日志</button>
         </div>
         <div class="tab-panel" data-result-panel="leads">
           <div class="section-title">
-            <h2>可跟进线索</h2>
+            <h2>需求候选与人工审核</h2>
             <span class="btn-row">
-              <button class="btn-export" onclick="exportExcel()">导出 Excel</button>
-              <button class="btn-md" onclick="exportMarkdown()">导出 Markdown</button>
-              <button onclick="submitMissedLeadFeedback()">提交漏识别反馈</button>
+              <button class="btn-export" onclick="exportExcel()">导出表格</button>
+              <button class="btn-md" onclick="exportMarkdown()">导出报告</button>
+              <button onclick="submitMissedLeadFeedback()">反馈遗漏线索</button>
             </span>
           </div>
+          ${leadFilterControls(focused, visibleLeads.length, leads.length)}
           <div class="lead-list">
-            ${leadRows || '<div class="empty" style="min-height:160px;">暂无达到阈值的线索。可降低阈值、补充需求描述或添加种子词。</div>'}
+            ${leadRows || `<div class="empty" style="min-height:160px;">${esc(emptyLeadMessage(focused))}</div>`}
           </div>
         </div>
         <div class="tab-panel" data-result-panel="report" hidden>
           <div class="section-title">
             <h2>获客报告</h2>
             <span class="btn-row">
-              <button class="btn-export" onclick="exportExcel()">导出 Excel</button>
-              <button class="btn-md" onclick="exportMarkdown()">导出 Markdown</button>
+              <button class="btn-export" onclick="exportExcel()">导出表格</button>
+              <button class="btn-md" onclick="exportMarkdown()">导出报告</button>
             </span>
           </div>
           <div class="summary"><b>需求描述：</b>${esc(demandDescription || '未记录')}<br><b>种子词：</b>${esc(seedKeyword || '未填写')}</div>
-          <div class="summary" style="margin-top:12px;">${esc(report.summary || '暂无报告')}</div>
+          <div class="summary" style="margin-top:12px;">${esc(reportText(report.summary || '报告尚未生成，可先查看已有线索和任务说明。', data))}</div>
           <div class="report-grid" style="margin-top:14px;">
             <div class="report-box"><h3>核心洞察</h3><ul>${insights || '<li>暂无洞察</li>'}</ul></div>
             <div class="report-box"><h3>推荐动作</h3><ul>${actions || '<li>暂无动作</li>'}</ul></div>
-            <div class="report-box"><h3>产品分布</h3><ul>${distRows || '<li>暂无产品匹配</li>'}</ul></div>
+            <div class="report-box"><h3>需求类别分布</h3><ul>${distRows || '<li>暂无需求分类</li>'}</ul></div>
             <div class="report-box"><h3>风险提示</h3><ul>${risks || '<li>销售跟进前需人工核验语境。</li>'}</ul></div>
           </div>
         </div>
@@ -1312,154 +1149,118 @@
             </table>
           </div>
         </div>
-        <div class="tab-panel" data-result-panel="logs" hidden>
-          <div class="section-title"><h2>执行日志</h2></div>
-          <div id="resultTaskEvents" class="timeline">${renderEventList(lastTaskEvents)}</div>
-        </div>
       `;
+      if ($('exportScope')) $('exportScope').value = exportScope;
+      if ($('leadFilter')) $('leadFilter').value = leadViewFilter;
+      restoreResultFormState(formState);
+      window.WorkbenchWorkspace?.resultsUpdated(data);
     }
 
-    async function search() {
-      const btn = $('searchBtn');
-      let body;
-      try {
-        body = payload();
-      } catch (err) {
-        alert(err.message || err);
-        return;
-      }
-      btn.disabled = true;
-      btn.textContent = '正在启动...';
-      renderPlaceholderResults('后台任务启动中...', '任务启动后会在任务进度与执行日志中展示每一步，刷新页面也可找回。');
-      try {
-        body.mode = $('batchMode').checked ? 'batch' : 'single';
-        body.batchMode = $('batchMode').checked;
-        setStatus('正在创建后台任务...', '⏳');
-        const res = await fetch(`${apiBase()}/api/tasks/start`, { method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-        const json = await res.json();
-        if (!json.ok) throw new Error(json.error || '启动任务失败');
-        const data = json.data;
-        if (data.ok === false) throw new Error(data.error || '启动任务失败');
-        currentTaskId = data.taskId;
-        localStorage.setItem('currentTaskId', currentTaskId);
-        renderTaskPanel(data);
-        setStatus(`任务 #${currentTaskId} 已启动，正在轮询执行日志...`, '⏳');
-        btn.textContent = '任务运行中';
-        $('stopBtn').style.display = 'block';
-        startPolling(currentTaskId);
-        loadTaskHistory();
-      } catch (err) {
-        $('output').className = 'card section';
-        $('output').innerHTML = `<div style="color:var(--red);"><b>执行失败</b><br>${esc(err.message || err)}</div>`;
-        setStatus('执行失败，请检查 xhs 登录态、验证码或配置。', '❌');
-        btn.disabled = false;
-        btn.textContent = '开始扫描线索';
-      }
+    let taskPollInFlight = null;
+    let taskPollGeneration = 0;
+    function stopTaskPolling() {
+      taskPollGeneration += 1;
+      if (pollTimer) { if (typeof clearTimeout === 'function') clearTimeout(pollTimer); else clearInterval(pollTimer); }
+      pollTimer = null;
     }
-
     function startPolling(taskId = currentTaskId) {
-      if (pollTimer) clearInterval(pollTimer);
+      stopTaskPolling();
       if (!taskId) return;
-      pollStatus(taskId);
-      pollTimer = setInterval(() => pollStatus(taskId), 2000);
+      const generation = taskPollGeneration;
+      const tick = async () => {
+        if (generation !== taskPollGeneration || String(taskId) !== String(currentTaskId) || document.hidden) return;
+        const snapshot = await pollStatus(taskId);
+        if (generation !== taskPollGeneration || String(taskId) !== String(currentTaskId)) return;
+        if (snapshot?.isRunning || snapshot?.isEvolving || (!snapshot && authenticated)) pollTimer = setTimeout(tick, 2000);
+      };
+      tick();
     }
 
     async function pollStatus(taskId = currentTaskId) {
+      while (taskPollInFlight) {
+        await taskPollInFlight;
+        if (String(taskId) !== String(currentTaskId)) return null;
+      }
+      let release;
+      taskPollInFlight = new Promise(resolve => { release = resolve; });
       try {
-        const res = await fetch(`${apiBase()}/api/tasks/status`, {
-          method:'POST',
-          credentials:'same-origin',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ taskId })
-        });
-        const json = await res.json();
-        if (!json.ok) throw new Error(json.error || '读取任务状态失败');
-        const data = json.data;
+        const data = await postJson('/api/tasks/status', { taskId });
+        if (String(taskId) !== String(currentTaskId)) return;
         if (!data || data.ok === false || data.hasTask === false) {
           setStatus('没有找到可恢复的任务。', '📢');
+          stopTaskPolling();
           return;
         }
+        window.WorkbenchWorkspace?.connectionUpdated(true);
         renderTaskPanel(data);
         const result = data.result || {};
-        if ((result.notes || []).length || result.report) render(result);
-        const round = data.totalRounds ? `[第 ${data.currentRound}/${data.totalRounds} 轮] ` : '';
-        const statusMessage = `${round}${data.statusText || taskStatusLabel(data.status)}`;
-        if (!data.isRunning && needsXhsLoginAssist(data.errorText || data.statusText)) {
-          setStatus(`${statusMessage}。可点右上角使用“小红书登录/验证助手”。`, '❌');
-        } else {
-          setStatus(statusMessage, data.errorText || data.status === 'failed' ? '❌' : (data.isRunning ? '⏳' : '✅'));
-        }
-        if (!data.isRunning) {
-          clearInterval(pollTimer);
-          pollTimer = null;
+        if ((result.notes || []).length || result.report || result.stageCoverage || !data.isRunning) render(result);
+        if (!data.isRunning && !data.isEvolving) {
+          stopTaskPolling();
           $('searchBtn').disabled = false;
-          $('searchBtn').textContent = '开始扫描线索';
+          $('searchBtn').textContent = '生成搜索计划 →';
           $('stopBtn').style.display = 'none';
           $('panelStopBtn').style.display = 'none';
           loadTaskHistory();
         }
+        return data;
       } catch (err) {
-        console.error(err);
+        if (String(taskId) !== String(currentTaskId)) return null;
+        window.WorkbenchWorkspace?.connectionUpdated(false, err.message);
+        if (!window.WorkbenchWorkspace) setStatus('连接中断，正在重试。已保存的任务结果仍可查看。', '⚠️');
+        return null;
+      } finally {
+        taskPollInFlight = null;
+        release();
       }
     }
 
     async function stopBatch() {
-      await fetch(`${apiBase()}/api/tasks/stop`, {
-        method:'POST',
-        credentials:'same-origin',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ taskId: currentTaskId })
-      });
+      try { await postJson('/api/tasks/stop', { taskId: currentTaskId }); } catch (error) { return setStatus('停止请求失败：' + error.message, '❌'); }
       setStatus('已发送停止信号，当前步骤结束后停止。', '⏳');
       if (currentTaskId) pollStatus(currentTaskId);
     }
 
+    const pendingFeedback = new Set();
     async function saveFeedback(index) {
       const lead = cachedData?.leads?.leads?.[index];
-      if (!lead) return alert('找不到该线索数据');
+      if (!lead) return notifyWorkbench('找不到该线索数据');
+      const taskId = String(currentTaskId), leadId = String(lead.lead_id), key = JSON.stringify([taskId, leadId]);
+      if (pendingFeedback.has(key)) return;
       const feedbackType = $(`feedbackType-${index}`).value;
       const userNote = $(`feedbackNote-${index}`).value.trim();
       const feedback = FEEDBACK_LABELS[feedbackType] || '其他';
+      const stillCurrent = () => String(currentTaskId) === taskId && String(cachedData?.leads?.leads?.[index]?.lead_id) === leadId;
+      pendingFeedback.add(key);
       try {
-        const res = await fetch(`${apiBase()}/api/feedback`, {
-          method:'POST',
-          credentials:'same-origin',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({
-            taskId: currentTaskId,
-            leadId: lead.lead_id,
-            commentId: lead.comment_id,
-            feedbackType,
-            feedback,
-            userNote,
-            evidence: lead.evidence || lead.content || '',
-            expectedResult: feedbackType === 'valid_lead'
-              ? '类似评论应保持为可跟进线索，并保留原文证据。'
-              : ''
-          })
+        const result = await postJson('/api/feedback', {
+          taskId, leadId: lead.lead_id, commentId: lead.comment_id, feedbackType, feedback, userNote,
+          evidence: lead.evidence || lead.content || '',
+          expectedResult: feedbackType === 'valid_lead' ? '类似评论应保持为可跟进线索，并保留原文证据。' : ''
         });
-        const json = await res.json();
-        if (!json.ok) throw new Error(json.error || '反馈保存失败');
         lead.feedback = feedback;
-        $(`feedbackStatus-${index}`).textContent = `已提交反馈 #${json.data?.feedbackId || '-'}，待 Harness 分析`;
-        $(`feedbackStatus-${index}`).style.color = 'var(--green)';
-      } catch (err) {
-        alert('反馈保存失败：' + err.message);
-      }
+        if (!stillCurrent()) { notifyWorkbench(`任务 #${taskId} 的反馈已提交。`, 'success'); return; }
+        cachedData.leads.leads[index].feedback = feedback;
+        const status = $(`feedbackStatus-${index}`);
+        if (status) { status.textContent = `已提交反馈 #${result?.feedbackId || '-'}，待管理后台分析`; status.style.color = 'var(--green)'; }
+      } catch (error) { notifyWorkbench(`任务 #${taskId} 反馈保存失败：${error.message}`); }
+      finally { pendingFeedback.delete(key); }
     }
 
     async function submitMissedLeadFeedback() {
-      if (!currentTaskId) return alert('请先选择或运行一个任务，再提交漏识别反馈。');
-      const evidence = prompt('粘贴未被识别为线索的评论原文，例如：怎么联系、怎么卖、有报价吗');
+      if (!currentTaskId) return notifyWorkbench('请先选择或运行一个任务，再提交漏识别反馈。');
+      const feedbackTaskId = currentTaskId;
+      const evidence = await promptWorkbench('提交漏识别反馈', '粘贴未被识别的评论原文', '', { multiline: true, confirmText: '下一步' });
       if (!evidence || !evidence.trim()) return;
-      const userNote = prompt('补充说明，可填写来源笔记标题/链接、你期望它如何展示为线索（可留空）') || '';
+      const userNote = await promptWorkbench('补充来源与判断', '来源笔记链接及你的审核依据（可选）', '', { multiline: true, confirmText: '提交反馈' });
+      if (userNote === null) return;
       try {
-        const res = await fetch(`${apiBase()}/api/feedback`, {
+        const res = await apiFetch(`${apiBase()}/api/feedback`, {
           method:'POST',
           credentials:'same-origin',
           headers:{'Content-Type':'application/json'},
           body: JSON.stringify({
-            taskId: currentTaskId,
+            taskId: feedbackTaskId,
             feedbackType: 'missed_lead',
             feedback: '漏识别线索',
             userNote,
@@ -1469,148 +1270,80 @@
         });
         const json = await res.json();
         if (!json.ok) throw new Error(json.error || '反馈提交失败');
-        setStatus(`漏识别反馈 #${json.data?.feedbackId || '-'} 已提交，可到 Harness 控制台进行 AI 分析。`, '✅');
+        setStatus(`漏识别反馈 #${json.data?.feedbackId || '-'} 已提交，可到管理后台进行智能分析。`, '✅');
       } catch (err) {
-        alert('漏识别反馈提交失败：' + err.message);
+        notifyWorkbench('漏识别反馈提交失败：' + err.message);
       }
-    }
-
-    function exportExcel() {
-      if (!cachedData) return alert('暂无可导出数据');
-      const wb = XLSX.utils.book_new();
-      const leads = cachedData.leads?.leads || [];
-      const notes = cachedData.notes || [];
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(leads.map(l => ({
-        线索类型: l.lead_type === 'note_author' ? '笔记作者' : '评论线索',
-        地域状态: geoStatusLabel(l.geo_status), 地域说明: l.geo_reason,
-        QA状态: qaStatusLabel(l.qa_status), 复审原因: l.review_required_reason,
-        评分: l.score, 优先级: l.priority, 阶段: l.stage, 昵称: l.nickname, 用户ID: l.user_id,
-        原文证据: l.evidence, 需求摘要: l.demand_summary, 推荐产品: l.recommended_products,
-        跟进话术: l.outreach_copy, 风险提示: l.risk, 来源笔记: l.note_title, 来源链接: l.note_url, 反馈: l.feedback
-      }))), '可跟进线索');
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(notes.map(n => ({
-        排名: n.rank, 标题: n.title, 作者: n.author, 日期: n.publish_date, 点赞: n.liked, 收藏: n.collected, 评论: n.comments, 综合互动: n.engagement, 链接: n.url
-      }))), '来源笔记');
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cachedData.leads?.productDistribution || []), '产品分布');
-      XLSX.writeFile(wb, `获客线索_${new Date().toISOString().slice(0,10)}.xlsx`);
-    }
-
-    function exportMarkdown() {
-      if (!cachedData) return alert('暂无可导出数据');
-      const report = cachedData.report || {};
-      const leads = cachedData.leads?.leads || [];
-      const demandDescription = getDemandDescription(cachedData);
-      const seedKeyword = cachedData.keyword || cachedData.request?.keyword || cachedData.payload?.keyword || $('keyword')?.value?.trim() || '';
-      const lines = [
-        '# 获客报告',
-        '',
-        `- 需求描述：${demandDescription || '未记录'}`,
-        `- 种子词：${seedKeyword || '未填写'}`,
-        `- 相关笔记：${cachedData.notes?.length || 0}`,
-        `- 达标线索：${leads.length}`,
-        '',
-        '## 摘要',
-        report.summary || '',
-        '',
-        '## Top 线索',
-        ...leads.slice(0, 10).map((l, i) => `${i + 1}. [${l.priority}/${l.score}] ${l.demand_summary}\\n   - 类型：${l.lead_type === 'note_author' ? '笔记作者' : '评论线索'}\\n   - QA：${qaStatusLabel(l.qa_status)}${l.review_required_reason ? `，${l.review_required_reason}` : ''}\\n   - 地域：${geoStatusLabel(l.geo_status) || '未标记'}${l.geo_reason ? `，${l.geo_reason}` : ''}\\n   - 证据：${l.evidence}\\n   - 产品：${l.recommended_products}\\n   - 话术：${l.outreach_copy}\\n   - 来源：${l.note_url}`),
-        '',
-        '## 风险提示',
-        ...((report.risks || ['销售跟进前需人工核验语境。']).map(x => `- ${x}`))
-      ];
-      const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = `获客报告_${new Date().toISOString().slice(0,10)}.md`;
-      a.click();
-      URL.revokeObjectURL(a.href);
-    }
-
-    async function loadConfig() {
-      try {
-        const res = await fetch(`${apiBase()}/api/config`);
-        const json = await res.json();
-        if (!json.ok) return;
-        workbenchConfig = json.data || workbenchConfig;
-        const enabled = workbenchConfig?.platforms?.enabled || ['xhs'];
-        if ($('platformXhs')) $('platformXhs').checked = enabled.includes('xhs');
-        if ($('platformDouyin')) $('platformDouyin').checked = enabled.includes('douyin');
-        if ($('businessDirection')) {
-          $('businessDirection').innerHTML = businessDirectionOptions($('businessDirection').value);
-          $('businessDirection').value = $('businessDirection').value || workbenchConfig?.defaultBusinessDirection || 'cloud_ai';
-          $('businessDirection').onchange = updateBusinessDirectionHelp;
-          updateBusinessDirectionHelp();
-        }
-      } catch {}
     }
 
     async function loadTaskHistory() {
       try {
-        const res = await fetch(`${apiBase()}/api/tasks/list`, {
-          method:'POST',
-          credentials:'same-origin',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ limit: 20 })
-        });
-        const json = await res.json();
-        if (!json.ok) return;
-        const data = json.data || {};
+        const data = await postJson('/api/tasks/list', { limit: 20 }) || {};
         renderHistory(data.tasks || data.data?.tasks || []);
+        window.WorkbenchWorkspace?.connectionUpdated(true);
       } catch (err) {
-        console.error(err);
+        window.WorkbenchWorkspace?.connectionUpdated(false, err.message || '任务列表同步失败');
       }
     }
 
     async function viewTask(taskId) {
-      currentTaskId = String(taskId);
-      localStorage.setItem('currentTaskId', currentTaskId);
-      await pollStatus(currentTaskId);
-      const data = await fetchTaskStatus(currentTaskId);
-      if (data?.isRunning) startPolling(currentTaskId);
+      stopTaskPolling();
+      const requestedTaskId = String(taskId);
+      if (requestedTaskId !== String(currentTaskId)) {
+        window.WorkbenchWorkspace?.taskSwitching(requestedTaskId);
+        cachedData = null; currentTaskSnapshot = null; renderedTaskId = null; lastTaskEvents = [];
+        renderPlaceholderResults(`正在读取任务 #${requestedTaskId}`, '正在同步任务与候选，读取成功后才能审核或触达。');
+        $('taskPanel').style.display = 'none'; $('stopBtn').style.display = 'none'; $('panelStopBtn').style.display = 'none';
+      }
+      currentTaskId = requestedTaskId;
+      localStorage.setItem('keywordWorkbenchTaskId', currentTaskId);
+      const data = await pollStatus(requestedTaskId);
+      if (currentTaskId !== requestedTaskId) return;
+      if (currentTaskId === requestedTaskId && (data?.isRunning || data?.isEvolving)) startPolling(requestedTaskId);
+      window.WorkbenchWorkspace?.taskOpened(requestedTaskId);
     }
 
     async function fetchTaskStatus(taskId) {
-      const res = await fetch(`${apiBase()}/api/tasks/status`, {
-        method:'POST',
-        credentials:'same-origin',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ taskId })
-      });
-      const json = await res.json();
-      if (!json.ok || json.data?.ok === false) return null;
-      return json.data;
+      const data = await postJson('/api/tasks/status', { taskId });
+      return data?.ok === false ? null : data;
     }
 
     async function restoreLastTask() {
       await loadTaskHistory();
+      const routeTask = window.WorkspaceUI?.route('tasks')?.taskId;
+      if (routeTask && /^\d+$/.test(String(routeTask))) currentTaskId = String(routeTask);
       if (!currentTaskId) return;
-      const data = await fetchTaskStatus(currentTaskId);
+      const requestedTaskId = currentTaskId;
+      const data = await fetchTaskStatus(requestedTaskId);
+      if (currentTaskId !== requestedTaskId) return;
       if (!data || data.hasTask === false) return;
       renderTaskPanel(data);
-      if (data.result && ((data.result.notes || []).length || data.result.report)) render(data.result);
-      setStatus(`已恢复任务 #${currentTaskId}：${data.statusText || taskStatusLabel(data.status)}`, data.isRunning ? '⏳' : '✅');
-      if (data.isRunning) {
+      if (data.result) render(data.result);
+      syncTaskStatus(data, `已恢复任务 #${currentTaskId}：`);
+      if (data.isRunning || data.isEvolving) {
         $('searchBtn').disabled = true;
-        $('searchBtn').textContent = '任务运行中';
-        $('stopBtn').style.display = 'block';
+        $('searchBtn').textContent = data.isEvolving ? '正在生成改进候选' : '任务运行中';
+        $('stopBtn').style.display = data.isRunning ? 'block' : 'none';
         startPolling(currentTaskId);
       }
     }
 
     async function openXhsLogin() {
       $('xhsLoginModal').style.display = 'flex';
+      window.WorkspaceUI?.showDialog($('xhsLoginModal'));
       await refreshXhsLoginStatus();
     }
 
     function closeXhsLogin() {
       $('xhsLoginModal').style.display = 'none';
+      window.WorkspaceUI?.closeDialog($('xhsLoginModal'));
       stopXhsLoginPolling();
     }
 
     function setXhsLoginHelp(text, ok = null) {
       const el = $('xhsLoginHelp');
       if (!el) return;
-      el.textContent = text;
+      setSystemMessage(el, text);
       el.style.color = ok === true ? 'var(--green)' : (ok === false ? 'var(--red)' : 'var(--muted)');
     }
 
@@ -1631,21 +1364,20 @@
       `;
     }
 
+    const xhsLoginPoller = WorkspaceData.createPoller({
+      read: () => postJson('/api/xhs_login/status', {}),
+      render: data => renderXhsLoginState(data || {}),
+      onError: error => setXhsLoginHelp(`检查失败：${error.message || error}`, false),
+      isActive: () => $('xhsLoginModal').style.display === 'flex',
+      delay: 2500
+    });
+
     function stopXhsLoginPolling() {
-      if (!xhsLoginPollTimer) return;
-      clearInterval(xhsLoginPollTimer);
-      xhsLoginPollTimer = null;
+      xhsLoginPoller.stop();
     }
 
     function startXhsLoginPolling() {
-      if (xhsLoginPollTimer) return;
-      xhsLoginPollTimer = setInterval(() => {
-        if ($('xhsLoginModal').style.display !== 'flex') {
-          stopXhsLoginPolling();
-          return;
-        }
-        refreshXhsLoginStatus({ silent: true });
-      }, 2500);
+      xhsLoginPoller.start();
     }
 
     function renderXhsLoginState(data) {
@@ -1662,7 +1394,7 @@
       if (helper.mode === 'qrcode') {
         if (status === 'confirmed') {
           stopXhsLoginPolling();
-          setXhsLoginHelp(helper.message || '手机端已确认，请点击“完成后验证登录态”写入本地 Cookie。', true);
+          setXhsLoginHelp(helper.message || '手机端已确认，请点击“完成后验证登录态”保存本地登录凭据。', true);
           return;
         }
         if (status === 'scanned') {
@@ -1672,7 +1404,7 @@
         }
         if (status === 'waiting') {
           startXhsLoginPolling();
-          setXhsLoginHelp(helper.message || '等待扫码。请使用小红书 App 扫描二维码。', null);
+          setXhsLoginHelp(helper.message || '等待扫码。请使用小红书手机应用 扫描二维码。', null);
           return;
         }
         if (status === 'expired') {
@@ -1688,25 +1420,17 @@
       }
       if (helper.mode === 'browser') {
         stopXhsLoginPolling();
-        setXhsLoginHelp(helper.message || '网页登录/验证窗口已打开。请在 Chrome 中完成登录或验证码验证后，再点击“完成后验证登录态”。', null);
+        setXhsLoginHelp(helper.message || '网页登录/验证窗口已打开。请在打开的浏览器中完成登录或验证码验证后，再点击“完成后验证登录态”。', null);
         return;
       }
       stopXhsLoginPolling();
-      setXhsLoginHelp(`当前未确认登录。${data?.xhsError || '请创建二维码登录会话，或确认本机 xhs-cli 已登录。'}`, false);
+      setXhsLoginHelp(`当前未确认登录。${data?.xhsError || '请创建二维码登录会话，或确认本机小红书采集工具已登录。'}`, false);
     }
 
     async function startXhsLogin(mode = 'qrcode') {
       setXhsLoginHelp(mode === 'browser' ? '正在打开小红书网页登录/验证窗口...' : '正在创建小红书登录会话...', null);
       try {
-        const res = await fetch(`${apiBase()}/api/xhs_login/start`, {
-          method:'POST',
-          credentials:'same-origin',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ mode })
-        });
-        const json = await res.json();
-        if (!json.ok) throw new Error(json.error || '创建登录会话失败');
-        const data = json.data || {};
+        const data = await postJson('/api/xhs_login/start', { mode }) || {};
         renderXhsLoginState({ helper: data });
       } catch (err) {
         stopXhsLoginPolling();
@@ -1719,16 +1443,13 @@
     }
 
     async function resetXhsLogin() {
-      const ok = confirm('将清除当前工作台保存的小红书 Cookie 和验证窗口缓存。清除后需要重新扫码或网页登录。确定切换账号吗？');
+      const ok = await (window.WorkspaceUI ? window.WorkspaceUI.confirm({ title: '切换平台账号', message: '将清除当前工作台保存的小红书登录凭据和验证窗口缓存。清除后需要重新扫码或网页登录。确定切换账号吗？', confirmText: '确认切换' }) : Promise.resolve(confirm('确认清除当前平台的本机登录状态并切换账号？')));
       if (!ok) return;
       stopXhsLoginPolling();
       renderXhsQr(null);
       setXhsLoginHelp('正在清除本机小红书登录态...', null);
       try {
-        const res = await fetch(`${apiBase()}/api/xhs_login/reset`, { method:'POST', credentials:'same-origin' });
-        const json = await res.json();
-        if (!json.ok) throw new Error(json.error || '清除登录态失败');
-        const data = json.data || {};
+        const data = await postJson('/api/xhs_login/reset', {}) || {};
         const cleared = data.status === 'cleared' && data.ok !== false;
         setXhsLoginHelp(data.message || '已清除本机小红书登录态。请重新扫码或打开网页登录/验证。', cleared);
         setStatus(cleared ? '小红书登录态已清除，请重新登录目标账号。' : '请先关闭小红书验证窗口，再重新点击切换账号。', '⚠️');
@@ -1738,83 +1459,72 @@
     }
 
     async function confirmXhsLogin() {
-      setXhsLoginHelp('正在确认登录会话并安全写入 Cookie，不会回显 Cookie 值...', null);
+      setXhsLoginHelp('正在确认登录会话并安全保存登录凭据，不会显示凭据内容…', null);
       try {
-        const statusRes = await fetch(`${apiBase()}/api/xhs_login/status`, { method:'POST', credentials:'same-origin' });
-        const statusJson = await statusRes.json();
-        if (!statusJson.ok) throw new Error(statusJson.error || '检查登录会话失败');
-        const helper = statusJson.data?.helper || {};
+        const status = await postJson('/api/xhs_login/status', {});
+        const helper = status?.helper || {};
         if (helper.mode === 'qrcode' && ['waiting', 'scanned', 'expired', 'error'].includes(helper.status || '')) {
-          renderXhsLoginState(statusJson.data || {});
+          renderXhsLoginState(status || {});
           return;
         }
-        const res = await fetch(`${apiBase()}/api/xhs_login/confirm`, { method:'POST', credentials:'same-origin' });
-        const json = await res.json();
-        if (!json.ok) throw new Error(json.error || '写入 Cookie 失败');
-        const xhs = json.data?.xhs;
+        const data = await postJson('/api/xhs_login/confirm', {});
+        const xhs = data?.xhs;
         const user = xhs?.data?.user || {};
         if (xhs?.data?.authenticated) {
           stopXhsLoginPolling();
           setXhsLoginHelp(`登录态已写入并验证成功：${user.nickname || user.name || user.id || '已登录账号'}。可以重新启动扫描。`, true);
           setStatus('小红书登录态已更新，可以重新启动扫描。', '✅');
         } else {
-          setXhsLoginHelp('Cookie 已尝试写入，但 xhs-cli 仍未确认登录。请完成扫码确认或官方验证后再点一次。', false);
+          setXhsLoginHelp('已尝试保存登录凭据，但采集工具仍未确认登录。请完成扫码确认或官方验证后再点一次。', false);
         }
       } catch (err) {
         const message = String(err.message || err);
         if (/Captcha required|验证码|验证|captcha/i.test(message)) {
-          setXhsLoginHelp(`确认失败：小红书要求继续完成网页登录/验证码验证。请点击“打开网页登录/验证”，在 Chrome 中完成验证后，再点“完成后验证登录态”。${message ? ` 原始错误：${message}` : ''}`, false);
+          setXhsLoginHelp(`确认失败：小红书要求继续完成网页登录/验证码验证。请点击“打开网页登录/验证”，在打开的浏览器中完成验证后，再点“完成后验证登录态”。${message ? ` 原始错误：${message}` : ''}`, false);
         } else {
           setXhsLoginHelp(`确认失败：${message}`, false);
         }
       }
     }
 
-    async function refreshXhsLoginStatus(options = {}) {
+    function refreshXhsLoginStatus(options = {}) {
       if (!options.silent) setXhsLoginHelp('正在检查小红书登录态...', null);
-      try {
-        const res = await fetch(`${apiBase()}/api/xhs_login/status`, { method:'POST', credentials:'same-origin' });
-        const json = await res.json();
-        if (!json.ok) throw new Error(json.error || '检查失败');
-        renderXhsLoginState(json.data || {});
-      } catch (err) {
-        stopXhsLoginPolling();
-        setXhsLoginHelp(`检查失败：${err.message || err}`, false);
-      }
+      return xhsLoginPoller.refresh();
     }
 
     function openDouyinLogin() {
       $('douyinLoginModal').style.display = 'flex';
+      window.WorkspaceUI?.showDialog($('douyinLoginModal'));
       refreshDouyinLoginStatus({ silent: true });
     }
 
     function closeDouyinLogin() {
       $('douyinLoginModal').style.display = 'none';
+      window.WorkspaceUI?.closeDialog($('douyinLoginModal'));
       stopDouyinLoginPolling();
     }
 
     function setDouyinLoginHelp(text, ok = null) {
       const el = $('douyinLoginHelp');
       if (!el) return;
-      el.textContent = text;
+      setSystemMessage(el, text);
       el.style.color = ok === true ? 'var(--green)' : (ok === false ? 'var(--red)' : 'var(--muted)');
     }
 
+    const douyinLoginPoller = WorkspaceData.createPoller({
+      read: () => postJson('/api/douyin_login/status', {}),
+      render: data => renderDouyinLoginState(data || {}),
+      onError: error => setDouyinLoginHelp(`检查失败：${error.message || error}`, false),
+      isActive: () => $('douyinLoginModal').style.display === 'flex',
+      delay: 3000
+    });
+
     function stopDouyinLoginPolling() {
-      if (!douyinLoginPollTimer) return;
-      clearInterval(douyinLoginPollTimer);
-      douyinLoginPollTimer = null;
+      douyinLoginPoller.stop();
     }
 
     function startDouyinLoginPolling() {
-      if (douyinLoginPollTimer) return;
-      douyinLoginPollTimer = setInterval(() => {
-        if ($('douyinLoginModal').style.display !== 'flex') {
-          stopDouyinLoginPolling();
-          return;
-        }
-        refreshDouyinLoginStatus({ silent: true });
-      }, 3000);
+      douyinLoginPoller.start();
     }
 
     function renderDouyinLoginState(data) {
@@ -1827,7 +1537,7 @@
       }
       if (helper.status === 'running') {
         startDouyinLoginPolling();
-        setDouyinLoginHelp(helper.message || '抖音登录/验证窗口已打开。请在 Chrome 中完成登录或验证码验证。', null);
+        setDouyinLoginHelp(helper.message || '抖音登录/验证窗口已打开。请在打开的浏览器中完成登录或验证码验证。', null);
         return;
       }
       stopDouyinLoginPolling();
@@ -1856,19 +1566,13 @@
       }
     }
 
-    async function refreshDouyinLoginStatus(options = {}) {
+    function refreshDouyinLoginStatus(options = {}) {
       if (!options.silent) setDouyinLoginHelp('正在检查抖音登录态...', null);
-      try {
-        const data = await postJson('/api/douyin_login/status', {});
-        renderDouyinLoginState(data || {});
-      } catch (err) {
-        stopDouyinLoginPolling();
-        setDouyinLoginHelp(`检查失败：${err.message || err}`, false);
-      }
+      return douyinLoginPoller.refresh();
     }
 
     async function resetDouyinLogin() {
-      const ok = confirm('将清除当前工作台保存的抖音 Chrome 登录缓存。清除后需要重新网页登录。确定切换账号吗？');
+      const ok = await (window.WorkspaceUI ? window.WorkspaceUI.confirm({ title: '切换平台账号', message: '将清除当前工作台保存的抖音浏览器登录缓存。清除后需要重新网页登录。确定切换账号吗？', confirmText: '确认切换' }) : Promise.resolve(confirm('确认清除当前平台的本机登录状态并切换账号？')));
       if (!ok) return;
       stopDouyinLoginPolling();
       setDouyinLoginHelp('正在清除本机抖音登录态...', null);
@@ -1882,15 +1586,18 @@
       }
     }
 
-    $('searchBtn').addEventListener('click', search);
+
     $('stopBtn').addEventListener('click', stopBatch);
     $('xhsLoginBtn').addEventListener('click', openXhsLogin);
     $('xhsLoginModal').addEventListener('click', e => { if (e.target.id === 'xhsLoginModal') closeXhsLogin(); });
     $('douyinLoginBtn').addEventListener('click', openDouyinLogin);
     $('douyinLoginModal').addEventListener('click', e => { if (e.target.id === 'douyinLoginModal') closeDouyinLogin(); });
     $('batchMode').addEventListener('change', e => { $('batchFields').style.display = e.target.checked ? 'block' : 'none'; });
-    wireButtonFeedback();
-    window.addEventListener('DOMContentLoaded', bootSales);
+    window.WorkspaceUI?.wireButtonFeedback();
+
   </script>
+  <script src="task-insights.js"></script>
+  <script src="workbench.js"></script>
+  <script src="workbench-workspace.js"></script>
 </body>
 </html>

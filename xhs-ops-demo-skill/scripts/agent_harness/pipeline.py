@@ -1,1224 +1,1065 @@
 from __future__ import annotations
 
+import copy
+import hashlib
+import heapq
+import inspect
+import json
 import random
 import time
-from typing import Any
+import uuid
+from collections import Counter, deque
+from typing import Any, Iterator
 
-from config_loader import enabled_platforms
+from source_normalization import METRIC_LABELS, extract_note, merge_note
+from note_dates import classify_note_time
+from json_utils import canonical_json
 from llm_client import has_llm_key
-from lead_pipeline import METRIC_LABELS, extract_note, merge_note, within_time_filter
-from product_catalog import BUSINESS_DIRECTIONS, PRODUCTS, product_distribution
-from sales_scoring import redact_text
-
-from .evaluator import HarnessEvaluator
+from note_images import MAX_IMAGES_PER_NOTE, fetch_note_image, missing_note_content, note_content
+from .planning import normalize_plan
+from .offering import SERVICE_POLICY_VERSION, apply_offering_decision, inquiry_review
 from .registry import PromptRegistry
-from .runtime import StructuredAgentRunner
+from .runtime import StructuredAgentRunner, redact_external, validate_agent_business_output
+
+
+class PipelineStopped(Exception):
+    pass
+
+
+class PlatformNeedsAction(Exception):
+    pass
 
 
 class HarnessPipeline:
-    def __init__(
-        self,
-        adapter: Any,
-        config: dict[str, Any],
-        storage: Any | None = None,
-        runner: StructuredAgentRunner | None = None,
-    ) -> None:
-        self.adapter = adapter
-        self.config = config
-        self.storage = storage
-        self.runner = runner
+    def __init__(self, adapter: Any, config: dict[str, Any], storage: Any | None = None,
+                 runner: StructuredAgentRunner | None = None) -> None:
+        self.adapter, self.config, self.storage, self.runner = adapter, config, storage, runner
         self._active_run_id = ""
         self._active_run_type = "main"
         self._active_platforms: list[str] = []
 
-    def run(
-        self,
-        payload: dict[str, Any],
-        task_id: int | None = None,
-        page: int = 1,
-        stop_checker: Any | None = None,
-        event_callback: Any | None = None,
-        progress_callback: Any | None = None,
-    ) -> dict[str, Any]:
-        emit = event_callback or (lambda level, agent, message, data=None: None)
-        progress = progress_callback or (lambda data: None)
-        llm_config = self.config.get("llm") or {}
-        if not has_llm_key(llm_config.get("api_key")):
-            raise RuntimeError("Harness 模式必须配置 LLM API Key；请在设置中填写 API Key 或设置 LLM_API_KEY/OPENAI_API_KEY。")
-
-        settings = self._settings(payload)
-        self._active_run_id = settings["runId"]
-        self._active_run_type = settings["runType"]
-        self._active_platforms = settings["platforms"]
-
+    def run(self, payload: dict[str, Any], task_id: int | None = None, page: int = 1,
+            stop_checker: Any | None = None, event_callback: Any | None = None,
+            progress_callback: Any | None = None, snapshot_callback: Any | None = None) -> dict[str, Any]:
+        if not isinstance(payload.get("confirmedPlan"), dict):
+            raise ValueError("请先预览、编辑并确认搜索计划；执行阶段不能自动扩词。")
+        plan = normalize_plan(payload["confirmedPlan"])
+        if not self.runner and not has_llm_key((self.config.get("llm") or {}).get("api_key"), (self.config.get("llm") or {}).get("api_base")):
+            raise ValueError("请先配置模型 API Key。")
+        self._active_run_id = str(payload.get("runId") or uuid.uuid4())
+        self._active_run_type = str(payload.get("runType") or "main")
+        self._active_platforms = plan["platforms"]
+        self._stop = stop_checker or (lambda: False)
+        self._emit = event_callback or (lambda *args: None)
+        self._progress = progress_callback or (lambda data: None)
+        self._last_progress_percent = 0
+        self._snapshot = snapshot_callback
+        self._task_id = task_id
+        self._plan = plan
+        self._time_reference = time.time()
+        self._page_budget = min(plan["maxPagesPerKeyword"], int(payload.get("pageBudget", plan["maxPagesPerKeyword"])))
+        if self._page_budget < 1:
+            raise ValueError("本轮 pageBudget 必须为正整数。")
+        self._last_read = 0.0
+        self._seen_note_ids = set(str(x) for x in payload.get("seenNoteIds", []))
+        self._seen_comment_ids = set(str(x) for x in payload.get("seenCommentIds", []))
+        remaining = payload.get("remaining") or {}
+        note_budget = min(plan["maxNotes"], max(0, int(payload.get("remainingNotes", remaining.get("maxNotes", plan["maxNotes"])))))
+        comment_budget = min(plan["maxCommentsTotal"], max(0, int(payload.get("remainingCommentsTotal", remaining.get("maxCommentsTotal", plan["maxCommentsTotal"])))))
+        self._summary = {"requested": {key: plan[key] for key in ("maxNotes", "maxCommentsTotal", "maxPagesPerKeyword", "maxCommentsPerNote")},
+                         "effectiveMaxNotes": note_budget, "effectiveMaxCommentsTotal": comment_budget,
+                         "searchRequests": 0, "receivedNotes": 0, "notesCollected": 0,
+                         "commentsCollected": 0, "duplicates": 0, "failures": [], "endReasons": [],
+                         "timeReferenceAt": self._time_reference,
+                         "filterCounts": {key: 0 for key in ("invalid_record", "non_note", "missing_note_id",
+                             "duplicate", "excluded_keyword", "outside_time_range", "unknown_publish_time", "capacity_limit")},
+                         "timeResolution": {"attempted": 0, "resolved": 0, "unresolved": 0, "failed": 0, "interrupted": 0}}
+        self._notes: list[dict[str, Any]] = []
+        self._leads: list[dict[str, Any]] = []
+        self._comments: list[dict[str, Any]] = []
+        self._content_targets: list[dict[str, Any]] = []
+        self._saved_note_fingerprints: dict[tuple[str, str], str] = {}
+        self._saved_lead_fingerprints: dict[tuple[str, str], str] = {}
+        self._report: dict[str, Any] = {}
+        self._qa: dict[str, Any] = {}
+        self._stage_coverage = {
+            key: {"status": "pending", "completed": 0, "total": 1 if key == "report" else 0, "unit": unit}
+            for key, unit in (("search", "query"), ("relevance", "note"), ("details", "note"),
+                              ("comments", "note"), ("lead_signal", "candidate"),
+                              ("qa", "candidate"), ("report", "report"))
+        }
+        self._active_stage = ""
+        self._status, self._error = "running", ""
         registry = PromptRegistry(self.storage)
         registry.ensure_defaults()
-        runner = self.runner or StructuredAgentRunner(
-            self.config,
-            self.storage,
-            task_id,
-            registry,
-            run_id=settings["runId"],
-            run_type=settings["runType"],
-        )
-        evaluator = HarnessEvaluator(self.storage)
-
-        self._ensure_platforms_ready(settings, emit)
-        task_context = {
-            "payload": payload,
-            "runId": settings["runId"],
-            "runType": settings["runType"],
-            "demandDescription": settings["demandDescription"],
-            "userConstraints": settings["userConstraints"],
-            "businessDirection": settings["businessDirection"],
-            "businessDirectionLabel": settings["businessDirectionLabel"],
-            "availableProducts": self._product_labels(),
-            "safety": self._safety(settings),
-        }
-        progress({"stage": "orchestrate", "percent": 4, "current": 0, "total": 1})
-
-        emit("info", "总控编排 Agent", "理解任务并拆分多 Agent 执行计划...")
-        chief = runner.run("chief_orchestrator", task_context, purpose="任务理解与阶段编排")
-        emit("success", "总控编排 Agent", str(chief.get("decision") or "执行计划已生成。"), chief)
-        self._audit_stage(
-            task_id,
-            stage="orchestrate",
-            agent_key="chief_orchestrator",
-            decision="completed",
-            reason=str(chief.get("decision") or chief.get("strategy_summary") or "总控编排 Agent 已生成任务策略。"),
-            evidence=chief.get("evidence") or chief.get("stages") or [],
-            confidence=chief.get("confidence"),
-            payload={
-                "strategy_summary": chief.get("strategy_summary"),
-                "target_customer_profile": chief.get("target_customer_profile"),
-                "demand_scope": chief.get("demand_scope"),
-                "exclusions": chief.get("exclusions"),
-                "stages": chief.get("stages"),
-                "review_policy": chief.get("review_policy"),
-            },
-        )
-
-        progress({"stage": "plan", "percent": 8, "current": 0, "total": 1})
-        emit("info", "搜索规划 Agent", "生成搜索策略和关键词包...")
-        planning = runner.run("planning_agent", {**task_context, "orchestrator": chief}, purpose="搜索策略规划")
-        settings["planning"] = planning
-        keywords = self._keywords(planning)
-        emit("success", "搜索规划 Agent", f"生成 {len(keywords)} 个 LLM 规划搜索词。", {"keywords": keywords, "planning": planning})
-        self._audit_stage(
-            task_id,
-            stage="plan",
-            agent_key="planning_agent",
-            decision="completed",
-            reason=str(planning.get("strategy_summary") or planning.get("decision") or "搜索规划 Agent 已生成搜索策略。"),
-            evidence=keywords,
-            confidence=planning.get("confidence"),
-            payload={
-                "strategy_summary": planning.get("strategy_summary"),
-                "target_customer_profile": planning.get("target_customer_profile"),
-                "exclusions": planning.get("exclusions"),
-                "geo_constraints": planning.get("geo_constraints"),
-                "keywords": keywords,
-                "hypotheses": planning.get("hypotheses"),
-            },
-        )
-        self._audit_planned_keywords(task_id, keywords, planning)
-
-        raw_notes = self._collect_raw_notes(keywords, settings, page, task_id, stop_checker, emit, progress)
-        progress({"stage": "relevance", "percent": 32, "current": 0, "total": len(raw_notes)})
-        selected = self._judge_relevance(runner, raw_notes, planning, settings, task_id, stop_checker, emit)
-        selected = selected[: settings["count"] * max(1, len(keywords))]
-
-        if settings["readDetail"]:
-            progress({"stage": "read_detail", "percent": 42, "current": 0, "total": len(selected)})
-            selected = self._enrich_notes(selected, settings, stop_checker, emit, progress)
-            self._audit_stage(
-                task_id,
-                stage="read_detail",
-                agent_key="tool_harness",
-                decision="completed",
-                reason=f"已读取 {len(selected)} 篇候选笔记详情。",
-                evidence=[note.get("title") or note.get("id") for note in selected[:20]],
-                payload={"notes_count": len(selected), "read_detail": True},
-            )
-        else:
-            emit("info", "工具 Harness", "已按用户设置跳过详情读取。")
-            self._audit_stage(
-                task_id,
-                stage="read_detail",
-                agent_key="tool_harness",
-                decision="skipped",
-                reason="用户关闭了读取笔记详情，本阶段跳过。",
-                payload={"read_detail": False},
-            )
-
-        comments: list[dict[str, Any]] = []
-        total_comments = 0
-        if settings["scanLeads"]:
-            progress({"stage": "comments", "percent": 56, "current": 0, "total": len(selected)})
-            comments, total_comments = self._collect_comments(selected, settings, task_id, stop_checker, emit, progress)
-            self._audit_stage(
-                task_id,
-                stage="comments",
-                agent_key="tool_harness",
-                decision="completed",
-                reason=f"已从 {len(selected)} 篇笔记中扫描 {total_comments} 条评论。",
-                evidence=[comment.get("comment_id") for comment in comments[:20]],
-                payload={"notes_count": len(selected), "comments_count": total_comments, "scan_leads": True},
-            )
-        else:
-            emit("info", "工具 Harness", "已按用户设置跳过评论扫描。")
-            self._audit_stage(
-                task_id,
-                stage="comments",
-                agent_key="tool_harness",
-                decision="skipped",
-                reason="用户关闭了评论扫描，本阶段跳过。",
-                payload={"scan_leads": False},
-            )
-
-        progress({"stage": "lead_signal", "percent": 68, "current": 0, "total": len(comments)})
-        leads = self._judge_leads(runner, selected, comments, settings, task_id, stop_checker, emit)
-
-        progress({"stage": "product_strategy", "percent": 76, "current": 0, "total": len(leads)})
-        leads, distribution = self._apply_product_strategy(runner, leads, selected, settings, task_id, emit)
-
-        progress({"stage": "qa", "percent": 84, "current": 0, "total": 1})
-        qa = self._run_qa(runner, selected, leads, distribution, settings, task_id, emit)
-
-        for idx, note in enumerate(sorted(selected, key=lambda item: item.get(settings["metric"], 0), reverse=True), 1):
-            note["rank"] = idx
-            if self.storage and task_id:
-                self.storage.save_note(task_id, note)
-        if self.storage and task_id:
-            for lead in leads:
-                self.storage.save_lead(task_id, lead)
-
-        progress({"stage": "report", "percent": 90, "current": 1, "total": 1})
-        report = self._make_report(runner, selected, leads, distribution, qa, settings, task_id, emit)
-
-        progress({"stage": "reflection", "percent": 95, "current": 1, "total": 1})
-        reflection = self._reflect_and_evolve(runner, evaluator, task_id, selected, leads, report, qa, emit)
-
-        agent_trace = self.storage.list_agent_runs(task_id) if self.storage and task_id else []
-        task_summary = self.storage.get_task_summary(task_id) if self.storage and task_id else reflection
-        prompt_summary = registry.summary()
-        audit_trail = self._audit_from_trace(agent_trace)
-        emit("success", "总控编排 Agent", f"Harness 任务完成：{len(selected)} 篇笔记，{len(leads)} 条 LLM 达标线索。")
-        progress({"stage": "done", "percent": 100, "current": 1, "total": 1})
-        return {
-            "keyword": "、".join(keywords),
-            "platforms": settings["platforms"],
-            "platformLabels": settings["platformLabels"],
-            "demandDescription": settings["demandDescription"],
-            "businessDirection": settings["businessDirection"],
-            "businessDirectionLabel": settings["businessDirectionLabel"],
-            "runId": settings["runId"],
-            "runType": settings["runType"],
-            "industry": settings["industry"],
-            "region": settings["region"],
-            "metric": settings["metric"],
-            "metricLabel": METRIC_LABELS[settings["metric"]],
-            "count": len(selected),
-            "scannedCommentsCount": total_comments,
-            "maxCommentsPerNote": settings["maxCommentsPerNote"],
-            "notes": selected,
-            "leads": {
-                "keyword": "、".join(keywords),
-                "scannedNotesCount": len(selected),
-                "totalCommentsScanned": total_comments,
-                "leadsCount": len(leads),
-                "minScore": settings["minScore"],
-                "leads": leads,
-                "productDistribution": distribution,
-            },
-            "report": report,
-            "qa": qa,
-            "taskSummary": task_summary,
-            "evolutionSummary": reflection.get("evolution_summary") or reflection.get("decision") or "",
-            "promptVersionSummary": prompt_summary,
-            "agentTrace": agent_trace,
-            "auditTrail": audit_trail,
-            "safety": self._safety(settings),
-            "harness": {"mode": "multi-agent-llm", "runId": settings["runId"], "runType": settings["runType"], "reviewPolicy": chief.get("review_policy", {})},
-        }
-
-    def _settings(self, payload: dict[str, Any]) -> dict[str, Any]:
-        xhs_config = self.config.get("xhs") or {}
-        douyin_config = self.config.get("douyin") or {}
-        sales_config = self.config.get("sales") or {}
-        configured_platforms = enabled_platforms((self.config.get("platforms") or {}).get("enabled"))
-        payload_platforms = payload.get("platforms")
-        if payload_platforms is None and payload.get("platform"):
-            payload_platforms = [payload.get("platform")]
-        platforms = [item for item in enabled_platforms(payload_platforms or configured_platforms) if item in configured_platforms or payload_platforms]
-        if not platforms:
-            platforms = configured_platforms or ["xhs"]
-        direction = str(payload.get("businessDirection") or sales_config.get("default_business_direction") or "cloud_ai")
-        direction_label = BUSINESS_DIRECTIONS.get(direction, BUSINESS_DIRECTIONS["cloud_ai"])["label"]
-        demand_description = str(
-            payload.get("demandDescription")
-            or payload.get("demand_description")
-            or payload.get("businessDirectionLabel")
-            or direction_label
-            or "寻找可人工跟进的线索"
-        ).strip()
-        metric = str(payload.get("metric") or "engagement")
-        if metric not in METRIC_LABELS:
-            metric = "engagement"
-        count = min(max(int(payload.get("count", 10)), 1), int(xhs_config.get("max_count", 20)))
-        min_score = min(max(int(payload.get("minScore", sales_config.get("default_min_score", 60))), 0), 100)
-        delay_min = min(max(float(payload.get("delayMin", xhs_config.get("read_delay_min", 7.0))), 0.0), 120.0)
-        delay_max = min(max(float(payload.get("delayMax", xhs_config.get("read_delay_max", 60.0))), delay_min), 120.0)
-        max_comments = min(max(int(payload.get("maxCommentsPerNote", xhs_config.get("max_comments_per_note", 50))), 1), 500)
-        max_comments_by_platform = {
-            "xhs": max_comments,
-            "douyin": min(max(int(payload.get("maxCommentsPerPost", douyin_config.get("max_comments_per_post", max_comments))), 1), 500),
-        }
-        geo_constraints = self._geo_constraints(demand_description, str(payload.get("region") or "").strip())
-        run_id = str(payload.get("runId") or payload.get("run_id") or f"task-{int(time.time() * 1000)}").strip()
-        run_type = str(payload.get("runType") or payload.get("run_type") or "main").strip() or "main"
-        return {
-            "runId": run_id,
-            "runType": run_type,
-            "platforms": platforms,
-            "platformLabels": [self._platform_label(platform) for platform in platforms],
-            "businessDirection": direction,
-            "businessDirectionLabel": direction_label,
-            "demandDescription": demand_description,
-            "industry": str(payload.get("industry") or "").strip(),
-            "region": str(payload.get("region") or "").strip(),
-            "keyword": str(payload.get("keyword") or "").strip(),
-            "metric": metric,
-            "count": count,
-            "minScore": min_score,
-            "timeFilter": str(payload.get("timeFilter") or "all"),
-            "readDetail": bool(payload.get("readDetail", True)),
-            "scanLeads": bool(payload.get("scanLeads", True)),
-            "delayMin": delay_min,
-            "delayMax": delay_max,
-            "maxCommentsPerNote": max_comments,
-            "maxCommentsByPlatform": max_comments_by_platform,
-            "geoConstraints": geo_constraints,
-            "redactUser": bool(sales_config.get("redact_user", False)),
-            "userConstraints": {
-                "industry": str(payload.get("industry") or "").strip(),
-                "region": str(payload.get("region") or "").strip(),
-                "seedKeywords": str(payload.get("keyword") or "").strip(),
-                "metric": metric,
-                "count": count,
-                "minScore": min_score,
-                "timeFilter": str(payload.get("timeFilter") or "all"),
-                "readDetail": bool(payload.get("readDetail", True)),
-                "scanLeads": bool(payload.get("scanLeads", True)),
-                "maxCommentsPerNote": max_comments,
-                "platforms": platforms,
-                "platformLabels": [self._platform_label(platform) for platform in platforms],
-                "geoConstraints": geo_constraints,
-                "legacyBusinessDirection": direction,
-                "legacyBusinessDirectionLabel": direction_label,
-                "businessDirection": direction,
-                "businessDirectionLabel": direction_label,
-                "runId": run_id,
-                "runType": run_type,
-            },
-        }
-
-    def _ensure_platforms_ready(self, settings: dict[str, Any], emit: Any) -> None:
-        for platform in settings.get("platforms") or ["xhs"]:
-            adapter = self._adapter_for(platform)
-            label = self._platform_label(platform)
-            if platform == "xhs":
-                emit("info", "登录检查", f"检查{label}登录态...")
+        runner = self.runner or StructuredAgentRunner(self.config, self.storage, task_id, registry,
+                    run_id=self._active_run_id, run_type=self._active_run_type)
+        self._image_runner = runner
+        try:
+            self._check_stop()
+            self._audit_stage(task_id, stage="plan", agent_key="confirmed_plan", decision="confirmed",
+                              reason="仅执行用户已确认的固定计划。", payload={"plan": plan})
+            if note_budget == 0:
+                self._summary["endReasons"].append("note_quota_reached")
+                for stage in self._stage_coverage:
+                    self._stage_coverage[stage]["status"] = "skipped"
             else:
-                emit("info", "登录检查", f"检查{label}只读数据源配置...")
-            adapter.ensure_authenticated()
-            if platform == "xhs":
-                emit("success", "登录检查", f"{label}登录态有效。")
+                self._start_stage("search", len(plan["keywords"]) * len(plan["platforms"]))
+                for platform in plan["platforms"]:
+                    self._read(self._adapter_for(platform).ensure_authenticated)
+                self._collect(plan, note_budget, page)
+                self._finish_stage("search")
+                if plan["readDetail"]:
+                    # Search cards often contain only a title. Read all retained,
+                    # budgeted sources before allowing a relevance rejection.
+                    self._details(self._notes)
+                    self._prune_time_exclusions()
+                else:
+                    for note in self._notes:
+                        if note.get("images"):
+                            note["image_status"] = "not_requested"
+                    self._skip_stage("details", "计划未启用正文读取，仅处理搜索摘要。")
+                self._refresh_content_coverage()
+                self._relevance(runner)
+                selected = [n for n in self._notes if (n.get("relevance") or {}).get("decision") in {"keep", "needs_content"}]
+                self._summary["unresolvedNotes"] = [n["id"] for n in self._notes if self._missing_content(n)]
+                if plan.get("offeringId") == "agent_custom_development":
+                    selected.sort(key=self._collection_rank)
+                if plan["scanLeads"]:
+                    self._collect_comments(selected, comment_budget)
+                else:
+                    self._skip_stage("comments", "计划未启用评论采集。")
+                self._identify(runner, selected)
+                self._check_stop()
+                if self._leads:
+                    self._review_leads(runner)
+                else:
+                    self._skip_stage("qa", "没有进入需求研判的候选，无需质检。")
+                self._check_stop()
+                self._start_stage("report", 1)
+                report_leads = (heapq.nsmallest(20, self._leads, key=lambda lead: (
+                    not lead.get("qualified"), lead.get("classification") != "uncertain", -lead.get("score", 0)))
+                    if plan.get("offeringId") == "agent_custom_development" else self._leads[:20])
+                self._report = self._agent(runner, "report_agent", {"plan": plan, "notesCount": len(self._notes),
+                    "leadsCount": len(self._leads), "topLeads": [self._model_lead(lead) for lead in report_leads],
+                    "noteContexts": self._note_contexts([lead["source_comment"] for lead in report_leads]),
+                    "qualifiedCount": sum(1 for lead in self._leads if lead.get("qualified")),
+                    "classificationCounts": dict(Counter(lead["classification"] for lead in self._leads)),
+                    "reportScope": {"included": len(report_leads), "total": len(self._leads), "summaryLimit": 20},
+                    **self._report_sources(),
+                    "collectionSummary": self._summary,
+                    "qa": self._qa}, "生成有来源的研究报告")
+                for key in ("productDistribution", "recommended_products", "matched_products"):
+                    self._report.pop(key, None)
+                self._stage_coverage["report"]["completed"] = 1
+                self._finish_stage("report")
+                self._check_stop()
+            self._status = "partial" if self._summary["failures"] else "completed"
+        except PipelineStopped:
+            self._status, self._error = "stopped", "已停止，保留已采集内容；未完成部分不视为成功。"
+            self._stage_error(self._active_stage, self._error)
+        except PlatformNeedsAction as exc:
+            self._status, self._error = "needs_action", str(exc)
+            self._stage_error(self._active_stage, self._error)
+        except Exception as exc:
+            self._status = "partial" if self._notes or self._leads else "failed"
+            self._error = str(redact_external(str(exc)))[:600]
+            self._stage_error(self._active_stage, self._error)
+            self._summary["failures"].append({"stage": self._active_stage or "pipeline", "error": self._error})
+        self._prune_time_exclusions()
+        self._flush(self._status, 100 if self._status == "completed" else None)
+        return self._result()
+
+    def _start_stage(self, stage: str, total: int) -> None:
+        self._active_stage = stage
+        self._stage_coverage[stage].update(status="running", completed=0, total=max(0, int(total)))
+        self._publish_coverage()
+
+    def _finish_stage(self, stage: str) -> None:
+        row = self._stage_coverage[stage]
+        if row.get("error"):
+            row["status"] = "partial" if row["completed"] else "failed"
+        elif not row["total"]:
+            row["status"] = "skipped"
+            row["reason"] = ("上游存在未解决的采集或证据缺口，本阶段没有可处理对象。"
+                if self._summary["failures"] else "当前范围没有可处理对象，无需执行。")
+        else:
+            row["status"] = "completed"
+        self._publish_coverage()
+        if self._active_stage == stage:
+            self._active_stage = ""
+
+    def _skip_stage(self, stage: str, reason: str = "当前范围没有可处理对象，无需执行。") -> None:
+        self._stage_coverage[stage].update(status="skipped", completed=0, total=0, reason=reason)
+        self._publish_coverage()
+
+    def _publish_coverage(self) -> None:
+        if self._snapshot:
+            self._snapshot(copy.deepcopy(self._result()))
+
+    def _stage_error(self, stage: str, error: str) -> None:
+        if stage not in self._stage_coverage:
+            return
+        row = self._stage_coverage[stage]
+        row["error"] = str(redact_external(str(error)))[:500]
+        row["status"] = "partial" if row["completed"] else "failed"
+
+    def _check_stop(self) -> None:
+        if self._stop():
+            raise PipelineStopped()
+
+    def _wait(self, seconds: float) -> None:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            self._check_stop()
+            time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+
+    def _read(self, method: Any, *args: Any, **kwargs: Any) -> Any:
+        """Three total attempts; only transient READ errors are retried here."""
+        for attempt in range(3):
+            self._check_stop()
+            if self._last_read:
+                self._wait(random.uniform(self._plan["delayMin"], self._plan["delayMax"]))
+            self._last_read = time.monotonic()
+            try:
+                result = method(*args, **kwargs)
+                if isinstance(result, dict) and (result.get("ok") is False or result.get("success") is False):
+                    raise RuntimeError(str(result.get("error") or result.get("message") or "平台返回失败"))
+                return result
+            except (PipelineStopped, PlatformNeedsAction):
+                raise
+            except Exception as exc:
+                message = str(redact_external(str(exc)))
+                lowered = message.lower()
+                if any(term in lowered for term in ("captcha", "verification", "cookie", "unauth", "未登录", "登录态", "验证码", "风控", "ip异常", "ip 异常", "401", "403")):
+                    raise PlatformNeedsAction(message) from exc
+                transient = isinstance(exc, (TimeoutError, ConnectionError)) or any(term in lowered for term in
+                    ("timeout", "timed out", "超过", "秒未返回", "connection", "network", "temporar", "429", "502", "503", "504"))
+                if not transient or attempt == 2:
+                    raise
+                self._emit("warning", "读取重试", f"临时读取失败，准备第 {attempt + 2}/3 次尝试。", {"error": message[:300]})
+                self._wait(min(2 ** attempt, 4))
+        raise RuntimeError("读取失败")
+
+    def _failure(self, stage: str, source: str, exc: Exception) -> None:
+        if isinstance(exc, (PipelineStopped, PlatformNeedsAction)):
+            raise exc
+        detail = {"stage": stage, "source": source, "error": str(redact_external(str(exc)))[:500]}
+        self._stage_error({"read_detail": "details", "time_filter": "search"}.get(stage, stage), detail["error"])
+        self._summary["failures"].append(detail)
+        self._emit("warning", stage, "部分内容未完成，已保留已取得的来源。", detail)
+
+    def _agent(self, runner: Any, key: str, data: dict[str, Any], purpose: str,
+               *, image_inputs: list[str] | None = None) -> dict[str, Any]:
+        self._check_stop()
+        # Even injected runners receive minimized payloads; source originals remain local.
+        options = {"image_inputs": image_inputs} if image_inputs else {}
+        result = runner.run(key, redact_external(data), purpose=purpose, **options)
+        self._check_stop()
+        validate_agent_business_output(key, result)
+        self._audit_stage(self._task_id, stage=key.removesuffix("_agent"), agent_key=key,
+                          decision="completed", reason=purpose, evidence=result.get("evidence"),
+                          confidence=result.get("confidence"))
+        return result
+
+    def _collect(self, plan: dict[str, Any], budget: int, first_page: int) -> None:
+        # Reserve a fair share for each confirmed keyword/platform before using overflow.
+        # Retain at most `budget` overflow notes in total, never one full buffer per query.
+        lanes = [{"platform": platform, "keyword": keyword, "nextPage": first_page,
+                  "pages": 0, "exhausted": False, "visited": False, "buffer": deque(),
+                  "collected": 0, "requests": 0}
+                 for keyword in plan["keywords"] for platform in plan["platforms"]]
+        seen: set[tuple[str, str]] = set()
+        buffered = 0
+
+        def accept(lane: dict[str, Any], note: dict[str, Any]) -> None:
+            self._notes.append(note)
+            lane["collected"] += 1
+
+        def coverage() -> None:
+            self._summary["keywordCoverage"] = [
+                {"platform": lane["platform"], "keyword": lane["keyword"],
+                 "notesCollected": lane["collected"], "requests": lane["requests"],
+                 "visited": lane["visited"], "exhausted": lane["exhausted"]}
+                for lane in lanes]
+
+        while len(self._notes) < budget:
+            active = [lane for lane in lanes if not lane["exhausted"] and lane["pages"] < self._page_budget]
+            if not active:
+                break
+            for index, lane in enumerate(active):
+                self._check_stop()
+                remaining = budget - len(self._notes)
+                if not remaining:
+                    break
+                allowance = (remaining + len(active) - index - 1) // (len(active) - index)
+                platform, keyword = lane["platform"], lane["keyword"]
+                adapter = self._adapter_for(platform)
+                kwargs = {"page": lane["nextPage"]}
+                if "sort" in inspect.signature(adapter.search).parameters:
+                    kwargs["sort"] = plan["sort"]
+                elif plan["sort"] != "popular":
+                    raise ValueError(f"{platform} 当前读取接口不支持 {plan['sort']} 排序，请修改计划。")
+                lane["pages"] += 1
+                lane["nextPage"] += 1
+                lane["requests"] += 1
+                audit_buffer = []
+                try:
+                    raw = self._read(adapter.search, keyword, **kwargs)
+                    self._summary["searchRequests"] += 1
+                    if not lane["visited"]:
+                        lane["visited"] = True
+                        self._stage_coverage["search"]["completed"] += 1
+                    data = raw.get("data") or raw
+                    items = data.get("items") or []
+                    self._summary["receivedNotes"] += len(items)
+                    accepted = 0
+                    for position, item in enumerate(items):
+                        self._check_stop()
+                        fallback_id = f"search:{kwargs['page']}:{position}"
+                        if not isinstance(item, dict):
+                            audit_buffer.append(self._record_filter(lane, {"id": fallback_id}, "invalid_record", "搜索结果不是有效对象"))
+                            continue
+                        if item.get("model_type") != "note":
+                            audit_buffer.append(self._record_filter(lane, {"id": str(item.get("id") or fallback_id)},
+                                "non_note", "搜索结果为非笔记项目"))
+                            continue
+                        note = extract_note({**item, "platform": platform}, now=self._time_reference)
+                        if not note:
+                            audit_buffer.append(self._record_filter(lane, {"id": fallback_id}, "missing_note_id", "笔记缺少来源编号，无法读取和核对"))
+                            continue
+                        identity = (platform, str(note["id"]))
+                        if identity in seen or str(note["id"]) in self._seen_note_ids or f"{platform}:{note['id']}" in self._seen_note_ids:
+                            self._summary["duplicates"] += 1
+                            audit_buffer.append(self._record_filter(lane, note, "duplicate", "本任务已检查过同一来源"))
+                            continue
+                        # Remember rejected sources too, so another keyword does not
+                        # repeat a failed/unknown-date detail lookup for the same note.
+                        seen.add(identity)
+                        text = f"{note.get('title', '')} {note.get('desc', '')}".casefold()
+                        if any(term.casefold() in text for term in plan["excludeKeywords"]):
+                            audit_buffer.append(self._record_filter(lane, note, "excluded_keyword", "命中用户确认的排除词"))
+                            continue
+                        note.update(source_keyword=keyword, collectedAt=time.time(), evidenceComplete=False,
+                                    sourceRefs=[{"platform": platform, "noteId": note["id"], "url": note["url"]}])
+                        if accepted >= allowance and buffered >= budget:
+                            audit_buffer.append(self._record_filter(lane, note, "capacity_limit", "本查询份额及任务候选缓冲已满，未继续读取详情"))
+                            continue
+                        check = self._time_check(note, plan["timeFilter"])
+                        if check["status"] == "unknown" and plan["readDetail"]:
+                            resolution = self._summary["timeResolution"]
+                            resolution["attempted"] += 1
+                            self._emit("info", "时间核验", "搜索摘要缺少可核验的发布时间，读取详情补证。",
+                                       {"platform": platform, "noteId": note["id"], "reason": check["reason"]})
+                            try:
+                                self._fetch_detail(note, error_stage="time_filter")
+                            except (PipelineStopped, PlatformNeedsAction):
+                                resolution["interrupted"] += 1
+                                raise
+                            check = self._time_check(note, plan["timeFilter"])
+                            resolution["resolved" if check["status"] != "unknown" else "unresolved"] += 1
+                            if note.get("read_error"):
+                                resolution["failed"] += 1
+                            audit_buffer.append({"stage": "time_filter", "entity_type": "note", "entity_id": note["id"],
+                                "platform": platform, "source_keyword": keyword, "decision": check["status"],
+                                "reason": check["reason"], "payload": {"timeFilterCheck": check,
+                                    "dateEvidence": redact_external(note.get("dateEvidence") or {}),
+                                    "detailFetched": bool(note.get("detailFetched"))}})
+                        if (note.get("relevance") or {}).get("decision") == "drop":
+                            audit_buffer.append(self._record_filter(lane, note, "excluded_keyword", "详情原文命中用户确认的排除词"))
+                            continue
+                        if check["status"] != "in_range":
+                            code = "outside_time_range" if check["status"] == "out_of_range" else "unknown_publish_time"
+                            audit_buffer.append(self._record_filter(lane, note, code, check["reason"]))
+                            continue
+                        if accepted < allowance and len(self._notes) < budget:
+                            accept(lane, note)
+                            accepted += 1
+                        elif buffered < budget:
+                            lane["buffer"].append(note)
+                            buffered += 1
+                    if not items or data.get("has_more") is False:
+                        lane["exhausted"] = True
+                        self._summary["endReasons"].append(f"{platform}:{keyword}:no_more_results")
+                    coverage()
+                    self._flush("search", 25)
+                except Exception as exc:
+                    self._failure("search", f"{platform}:{keyword}:{kwargs['page']}", exc)
+                    lane["exhausted"] = True
+                    coverage()
+                finally:
+                    self._save_audit(self._task_id, audit_buffer)
+            # Reuse already returned unique results when another query's fair share was empty.
+            while buffered and len(self._notes) < budget:
+                for lane in lanes:
+                    self._check_stop()
+                    if lane["buffer"] and len(self._notes) < budget:
+                        accept(lane, lane["buffer"].popleft())
+                        buffered -= 1
+                coverage()
+                self._flush("search", 25)
+        coverage()
+        remaining_audits = []
+        for lane in lanes:
+            while lane["buffer"]:
+                remaining_audits.append(self._record_filter(lane, lane["buffer"].popleft(),
+                    "capacity_limit", "已达到全任务笔记上限，未纳入最终结果"))
+        self._save_audit(self._task_id, remaining_audits)
+        counts = self._summary["filterCounts"]
+        if counts["unknown_publish_time"]:
+            self._failure("time_filter", "publication_time", ValueError(
+                f"{counts['unknown_publish_time']} 条来源的发布时间仍待核验，未纳入所选时间范围；不能据此判断没有需求。"))
+        if not self._notes:
+            if counts["unknown_publish_time"]:
+                self._summary["zeroResultReason"] = "没有可确认在所选时间范围内的笔记；存在发布时间待核验项，请查看过滤明细。"
+            elif self._summary["failures"]:
+                self._summary["zeroResultReason"] = "采集或读取未完整完成，没有可用笔记；请先处理失败来源。"
+            elif self._summary["receivedNotes"]:
+                self._summary["zeroResultReason"] = "返回内容经时间范围、排除项及来源类型筛选后无可用笔记，具体数量见过滤明细。"
             else:
-                emit("success", "登录检查", f"{label}只读数据源可用。")
+                self._summary["zeroResultReason"] = "平台在已执行的关键词与页数范围内没有返回结果。"
+        self._emit("info", "采集筛选", "搜索及本地筛选结束，已记录过滤明细。",
+                   {"received": self._summary["receivedNotes"], "retained": len(self._notes),
+                    "filterCounts": dict(counts), "timeResolution": dict(self._summary["timeResolution"])})
+        self._summary["endReasons"].append("note_quota_reached" if len(self._notes) >= budget else "configured_pages_completed")
+
+    def _record_filter(self, lane: dict[str, Any], note: dict[str, Any], code: str, reason: str) -> dict[str, Any]:
+        self._summary["filterCounts"][code] += 1
+        return {"stage": "search_filter", "entity_type": "note", "entity_id": str(note.get("id") or ""),
+                "platform": lane["platform"], "source_keyword": lane["keyword"], "decision": code, "reason": reason,
+                "payload": redact_external({"publish_date": note.get("publish_date"),
+                    "publish_time_ms": note.get("publish_time_ms"), "dateEvidence": note.get("dateEvidence"),
+                    "timeFilterCheck": note.get("timeFilterCheck")})}
+
+    def _time_check(self, note: dict[str, Any], selected: str) -> dict[str, Any]:
+        check = {**classify_note_time(note, selected, getattr(self, "_time_reference", time.time())),
+                 "selected": selected, "referenceAt": getattr(self, "_time_reference", None)}
+        check["reasonCode"] = check["reason"]
+        check["reason"] = {
+            "unrestricted": "本次未限制发布时间", "within_window": "发布时间在确认范围内",
+            "older_than_window": "发布时间早于所选时间范围", "missing_time": "来源未提供发布时间",
+            "update_only": "来源仅提供编辑时间，不能据此确认发布时间",
+            "unrecognized_time": "发布时间文本无法解析", "invalid_time": "发布时间字段无效",
+            "future_time": "时间晚于本次检索参考时点，无法确认发布时间",
+            "boundary_precision": "日期精度不足以判断是否位于时间范围边界内",
+            "unsupported_time_filter": "不支持的时间范围",
+        }.get(check["reasonCode"], "无法确认来源发布时间")
+        note["timeFilterCheck"] = check
+        return check
+
+
+    def _relevance(self, runner: Any) -> None:
+        self._start_stage("relevance", len(self._notes))
+        # Platform-local batches avoid ambiguity if two platforms use the same note ID.
+        batches = (chunk for platform in self._plan["platforms"]
+                   for chunk in self._chunks([n for n in self._notes if n["platform"] == platform], 12))
+        for chunk in batches:
+            decisions = {str(n["id"]): n["relevance"] for n in chunk
+                         if (n.get("relevance") or {}).get("decision") == "drop"}
+            decisions.update({str(n["id"]): {"decision": "needs_content", "reason": "正文证据未完整取得，保留来源与独立评论待核验，不能仅凭标题排除。",
+                         "collection_priority": "normal", "coverage_status": "source_missing"}
+                         for n in chunk if self._missing_content(n) and str(n["id"]) not in decisions})
+            batch_error = None
+            try:
+                for attempt in range(2):
+                    missing = [note for note in chunk if str(note["id"]) not in decisions]
+                    if not missing:
+                        break
+                    output = self._agent(runner, "relevance_agent", {"plan": self._plan,
+                        "notes": [self._model_note(self._note_brief(n)) for n in missing],
+                        "reviewMode": "missing_batch" if attempt else "initial"}, "按确认计划判断相关性")
+                    decisions.update(self._note_decisions(output.get("notes") or [], "retry" if attempt else "initial"))
+            except Exception as exc:
+                batch_error = exc
+            for note in chunk:
+                if batch_error and str(note["id"]) not in decisions:
+                    continue
+                decision = decisions.get(str(note["id"])) or {"decision": "missing_decision", "reason": "未取得与原始笔记编号匹配的相关性判断"}
+                note["relevance"] = decision
+                if decision["decision"] == "missing_decision":
+                    self._summary["failures"].append({"stage": "relevance", "source": note["id"], "error": decision["reason"]})
+                    self._stage_error("relevance", decision["reason"])
+                else:
+                    self._stage_coverage["relevance"]["completed"] += 1
+                self._save_audit(self._task_id, [{"platform": note["platform"], "stage": "relevance", "entity_type": "note",
+                    "entity_id": note["id"], "decision": decision["decision"], "reason": decision.get("reason", ""),
+                    "source_keyword": note.get("source_keyword", ""), "call_id": getattr(runner, "last_call_id", ""),
+                    "evidence": decision.get("evidence", [])}])
+            self._flush("relevance", 40)
+            if batch_error:
+                raise batch_error
+        self._finish_stage("relevance")
+
+    @staticmethod
+    def _missing_content(note: dict[str, Any]) -> bool:
+        return missing_note_content(note)
+
+    def _fetch_detail(self, note: dict[str, Any], *, error_stage: str = "read_detail") -> None:
+        note["detailAttempted"] = True
+        try:
+            raw = self._read(self._adapter_for(note["platform"]).read_note, note["id"])
+            items = (raw.get("data") or raw).get("items") or []
+            detail = next((extract_note({**item, "platform": note["platform"]}, now=self._time_reference) for item in items
+                           if str(item.get("id") or (item.get("note_card") or {}).get("note_id")) == str(note["id"])), None)
+            if not detail:
+                raise ValueError("详情未返回对应来源，保留搜索摘要并标记证据不完整。")
+            note.update(merge_note(note, detail))
+            # A title or a retained search snippet is not full-body evidence.
+            note["desc"] = detail.get("desc") or ""
+            note["evidenceComplete"] = not self._missing_content(note)
+            note["detailFetched"] = True
+            if any(term.casefold() in (str(note.get("title", "")) + " " + str(note.get("desc", ""))).casefold()
+                   for term in self._plan["excludeKeywords"]):
+                note["relevance"] = {"decision": "drop", "reason": "完整原文命中用户确认的排除词"}
+            if error_stage != "time_filter":
+                # A search snippet is provisional evidence. A later, more
+                # precise publication date must still satisfy the fixed plan.
+                check = self._time_check(note, self._plan["timeFilter"])
+                if check["status"] != "in_range":
+                    note["time_filter_excluded"] = True
+                    note["relevance"] = {"decision": "drop", "reason": "详情时间复核：" + check["reason"]}
+                    code = "outside_time_range" if check["status"] == "out_of_range" else "unknown_publish_time"
+                    lane = {"platform": note["platform"], "keyword": note.get("source_keyword", "")}
+                    self._save_audit(self._task_id, [self._record_filter(lane, note, code, "详情时间复核：" + check["reason"])])
+                    if code == "unknown_publish_time":
+                        self._failure("time_filter", note["id"], ValueError("详情中的发布时间仍待核验，未纳入所选范围。"))
+                    # Retain the inspected source and its exclusion in the audit
+                    # store while removing it from the final in-scope results.
+                    if self.storage and self._task_id:
+                        self.storage.save_note(self._task_id, note)
+        except Exception as exc:
+            note["read_error"] = str(redact_external(str(exc)))[:300]
+            self._failure(error_stage, note["id"], exc)
+
+    def _prune_time_exclusions(self) -> None:
+        before = len(self._notes)
+        self._notes = [note for note in self._notes if not note.get("time_filter_excluded")]
+        if before != len(self._notes):
+            kept = Counter((note["platform"], note.get("source_keyword")) for note in self._notes)
+            for lane in self._summary.get("keywordCoverage", []):
+                lane["notesCollected"] = kept[(lane["platform"], lane["keyword"])]
+        if before and not self._notes:
+            self._summary["zeroResultReason"] = ("详情复核后，来源发布时间仍待核验，未纳入所选时间范围。"
+                if self._summary["filterCounts"]["unknown_publish_time"] else
+                "详情复核后，候选笔记发布时间均不符合所选时间范围；不能据此判断没有需求。")
+
+    def _details(self, notes: list[dict[str, Any]]) -> None:
+        targets = {(n["platform"], n["id"]): n for n in notes}
+        self._content_targets = list(targets.values())
+        self._start_stage("details", len(targets))
+        for note in targets.values():
+            self._check_stop()
+            if not note.get("detailFetched") and not note.get("read_error"):
+                self._fetch_detail(note)
+            if note.get("detailFetched") and not note.get("time_filter_excluded"):
+                self._read_images(note, self._image_runner)
+                note["evidenceComplete"] = not self._missing_content(note)
+                if any(term.casefold() in note_content(note).casefold() for term in self._plan["excludeKeywords"]):
+                    note["relevance"] = {"decision": "drop", "reason": "笔记正文、标签或图片文字命中用户确认的排除词"}
+            if note.get("detailFetched") and (not self._missing_content(note) or self._verified_time_exclusion(note)):
+                self._stage_coverage["details"]["completed"] += 1
+            elif note.get("read_error"):
+                self._stage_error("details", note["read_error"])
+            elif not note.get("time_filter_excluded"):
+                note["content_gap"] = note.get("content_gap") or "详情没有可用正文（空白或仅话题标签），图文或视频内容尚待核验。"
+                self._failure("read_detail", note["id"], ValueError(note["content_gap"]))
+            self._refresh_content_coverage()
+            self._flush("read_detail", 32)
+        self._finish_stage("details")
+
+    def _read_images(self, note: dict[str, Any], runner: Any) -> None:
+        if not note.get("images"):
+            note["image_status"] = "not_applicable"
+            return
+        if note.get("image_status") == "complete":
+            return
+        sources = note.get("image_sources") or []
+        rows: list[dict[str, Any]] = []
+        note["image_evidence"] = rows
+        note["image_status"] = "partial"
+        note["evidenceComplete"] = False
+        for source in sources[:MAX_IMAGES_PER_NOTE]:
+            self._check_stop()
+            index = source["index"]
+            row = {**source, "status": "failed", "text": "", "visual_description": "", "uncertain_regions": []}
+            rows.append(row)
+            self._emit("info", "图片内容识别", f"正在读取第 {index}/{note['images']} 张笔记图片。",
+                       {"platform": note["platform"], "noteId": note["id"], "imageIndex": index})
+            try:
+                image = fetch_note_image(source["url"], note["platform"], stop_check=self._check_stop)
+                row.update({key: value for key, value in image.items() if key != "data_uri"})
+                output = self._agent(runner, "image_reading_agent", {
+                    "platform": note["platform"], "note_id": note["id"],
+                    "image": {key: row[key] for key in ("index", "sha256", "mime", "bytes", "width", "height")},
+                }, f"识别笔记第 {index} 张图片", image_inputs=[image["data_uri"]])
+                row.update({key: output[key] for key in ("status", "text", "visual_description", "uncertain_regions")})
+                row["confidence"] = output.get("confidence", 0)
+                row["call_id"] = getattr(runner, "last_call_id", "")
+                if row["uncertain_regions"] or float(row["confidence"]) < .8:
+                    row["status"] = "partial"
+                if row["status"] not in {"recognized", "no_text"}:
+                    row["error"] = "图片部分内容未能可靠识别，需人工核对。"
+            except (PipelineStopped, PlatformNeedsAction):
+                raise
+            except Exception as exc:
+                row["status"] = "failed"
+                row["error"] = str(redact_external(str(exc)))[:300]
+                row["call_id"] = getattr(runner, "last_call_id", "") if row.get("sha256") else ""
+            self._refresh_content_coverage()
+            self._flush("read_detail", 32)
+        complete = sum(row["status"] in {"recognized", "no_text"} for row in rows)
+        note["image_status"] = "complete" if complete == note["images"] else "partial"
+        if note["image_status"] != "complete":
+            note["content_gap"] = f"共 {note['images']} 张图片，{complete} 张完成识别；其余图片未完整读取，需核验。"
+            if len(sources) > MAX_IMAGES_PER_NOTE:
+                note["content_gap"] += f" 单条笔记最多自动识别 {MAX_IMAGES_PER_NOTE} 张。"
+        else:
+            note.pop("content_gap", None)
+
+    def _refresh_content_coverage(self) -> None:
+        full_text = self._plan["readDetail"]
+        targets = (self._content_targets or self._notes) if full_text else self._notes
+        attempted = [n for n in targets if n.get("detailAttempted") or n.get("detailFetched") or n.get("read_error")]
+        excluded = [n for n in targets if self._verified_time_exclusion(n)]
+        missing = [n for n in attempted if self._missing_content(n) and not self._verified_time_exclusion(n)]
+        gaps = [{"platform": n["platform"], "noteId": n["id"],
+                 "reason": n.get("read_error") or n.get("content_gap") or "正文尚未取得，不能仅凭标题确认无关。"}
+                for n in (missing if full_text else targets) if self._missing_content(n)]
+        self._summary["contentCoverage"] = {
+            "mode": "full_text" if full_text else "summary", "requested": len(targets) if full_text else 0,
+            "attempted": len(attempted), "fetched": sum(bool(n.get("detailFetched")) for n in targets),
+            "complete": sum(bool(n.get("detailFetched")) and not self._missing_content(n) and not self._verified_time_exclusion(n) for n in targets),
+            "excluded": len(excluded),
+            "missing": len(missing) if full_text else len(gaps),
+            "failed": sum(bool(n.get("read_error")) for n in targets),
+            "pending": len(targets) - len(attempted) if full_text else 0, "gaps": gaps,
+            "images": {"total": sum(n.get("images", 0) for n in targets),
+                       "attempted": sum(len(n.get("image_evidence") or []) for n in targets),
+                       "complete": sum(row.get("status") in {"recognized", "no_text"}
+                                       for n in targets for row in n.get("image_evidence") or []),
+                       "failed": sum(row.get("status") == "failed"
+                                     for n in targets for row in n.get("image_evidence") or [])},
+        }
+
+    @staticmethod
+    def _verified_time_exclusion(note: dict[str, Any]) -> bool:
+        return bool(note.get("time_filter_excluded")) and (note.get("timeFilterCheck") or {}).get("status") == "out_of_range"
+
+    def _report_sources(self) -> dict[str, Any]:
+        # Zero leads must still have an inspectable source trail. Bound report
+        # detail separately from full aggregate coverage and disclose the limit.
+        examined = self._content_targets if self._plan["readDetail"] else self._notes
+        selected = examined[:20]
+        return {"sourceCoverage": {
+                    "notes": len(self._notes),
+                    "relevance": dict(Counter((n.get("relevance") or {}).get("decision", "pending") for n in self._notes)),
+                    "content": copy.deepcopy(self._summary.get("contentCoverage") or {}),
+                    "comments": copy.deepcopy(self._stage_coverage["comments"]),
+                    "sourceEvidenceIncluded": len(selected), "sourceEvidenceTotal": len(examined),
+                    "sourceEvidenceLimit": 20},
+                "sourceEvidence": [{**self._model_note(self._note_brief(n)),
+                    "relevance": n.get("relevance") or {},
+                    "contentGap": n.get("read_error") or n.get("content_gap") or "",
+                    "timeFilterCheck": n.get("timeFilterCheck") or {},
+                    "commentsCollected": n.get("scanned_comments_count", 0),
+                    "commentCoverage": n.get("commentCoverage") or {}}
+                    for n in selected]}
+
+    @staticmethod
+    def _collection_rank(note: dict[str, Any]) -> int:
+        text = note_content(note)
+        priority = (note.get("relevance") or {}).get("collection_priority", "normal")
+        if any(term in text for term in ("不接受外包", "不可能外包", "只接受坐班", "不接受异地，外包")):
+            priority = "low"
+            note["collection_priority_reason"] = "正文明确为坐班/拒绝外包；保留独立评论判断，但降低扫描顺序。"
+        note["collection_priority"] = priority
+        return {"high": 0, "normal": 1, "low": 2}.get(priority, 1)
+
+    def _collect_comments(self, notes: list[dict[str, Any]], budget: int) -> None:
+        self._start_stage("comments", len(notes))
+        if notes and budget <= 0:
+            self._stage_coverage["comments"].update(status="skipped", unscanned=len(notes),
+                reason="已达到确认的评论总上限，本轮未扫描评论。")
+            self._publish_coverage()
+            return
+        seen = set()
+        for note in notes:
+            self._check_stop()
+            if len(self._comments) >= budget:
+                self._summary["endReasons"].append("comment_quota_reached")
+                self._stage_coverage["comments"]["reason"] = "已达到确认的评论总上限，其余来源未扫描评论。"
+                break
+            cursor, cursors, count = "", set(), 0
+            complete = True
+            note["commentCoverage"] = {"status": "running", "requests": 0, "collected": 0,
+                                       "limit": self._plan["maxCommentsPerNote"]}
+            while count < self._plan["maxCommentsPerNote"] and len(self._comments) < budget:
+                self._check_stop()
+                try:
+                    note["commentCoverage"]["requests"] += 1
+                    raw = self._read(self._adapter_for(note["platform"]).comments, note["id"], cursor=cursor)
+                    data = raw.get("data") or raw
+                    items = data.get("comments") or []
+                    added = 0
+                    for raw_comment in items:
+                        self._check_stop()
+                        comment = self._comment_brief(raw_comment, note, self._plan)
+                        identity = (note["platform"], note["id"], comment["comment_id"])
+                        if identity in seen or comment["comment_id"] in self._seen_comment_ids or f"{note['platform']}:{note['id']}:{comment['comment_id']}" in self._seen_comment_ids:
+                            continue
+                        seen.add(identity)
+                        self._comments.append(comment)
+                        count += 1
+                        added += 1
+                        if self.storage and self._task_id:
+                            self.storage.save_comment(self._task_id, note["id"], {
+                                **raw_comment, "id": comment["comment_id"], "platform": note["platform"],
+                                "source_comment_id": comment["source_comment_id"],
+                                "id_is_synthetic": comment["id_is_synthetic"],
+                            })
+                        if count >= self._plan["maxCommentsPerNote"] or len(self._comments) >= budget:
+                            break
+                    note["scanned_comments_count"] = count
+                    note["commentCoverage"]["collected"] = count
+                    self._flush("comments", 60)
+                    next_cursor = str(data.get("cursor") or "")
+                    if count >= self._plan["maxCommentsPerNote"] or len(self._comments) >= budget:
+                        note["commentCoverage"].update(status="limited", reason=(
+                            "已达到确认的单篇评论上限。" if count >= self._plan["maxCommentsPerNote"] else "已达到确认的评论总上限。"))
+                        break
+                    if not items or not added or not data.get("has_more") or not next_cursor or next_cursor in cursors:
+                        note["commentCoverage"].update(status="completed", reason="本次评论读取未返回更多可用结果。")
+                        break
+                    cursors.add(next_cursor)
+                    cursor = next_cursor
+                except Exception as exc:
+                    complete = False
+                    note["comment_error"] = str(redact_external(str(exc)))[:300]
+                    note["commentCoverage"].update(status="failed", reason=note["comment_error"])
+                    self._failure("comments", note["id"], exc)
+                    break
+            if complete:
+                if note["commentCoverage"]["status"] == "running":
+                    note["commentCoverage"].update(status="limited", reason=(
+                        "已达到确认的单篇评论上限。" if count >= self._plan["maxCommentsPerNote"] else "已达到确认的评论总上限。"))
+                self._stage_coverage["comments"]["completed"] += 1
+            self._flush("comments", 60)
+        self._stage_coverage["comments"]["unscanned"] = sum("commentCoverage" not in n for n in notes)
+        self._stage_coverage["comments"]["limited"] = sum((n.get("commentCoverage") or {}).get("status") == "limited" for n in notes)
+        if self._stage_coverage["comments"]["limited"]:
+            self._stage_coverage["comments"].setdefault("reason", "部分来源已达到确认的评论采集上限，结果仅覆盖已读取的评论。")
+        self._finish_stage("comments")
+
+    def _identify(self, runner: Any, selected: list[dict[str, Any]]) -> None:
+        candidates = [*self._comments, *self._note_author_candidates(selected, self._plan)]
+        self._stage_coverage["qa"]["total"] = len(candidates)
+        self._start_stage("lead_signal", len(candidates))
+        for chunk in self._chunks(candidates, 5):
+            call_ids = {}
+            decisions = {candidate["candidate_id"]: {"decision": "ignore", "classification": "irrelevant",
+                         "score": 0, "reason": "原文命中用户确认的排除词", "evidence": [candidate.get("content", "")]}
+                         for candidate in chunk if any(term.casefold() in str(candidate.get("content", "")).casefold()
+                                                       for term in self._plan["excludeKeywords"])}
+            batch_error = None
+            try:
+                for attempt in range(2):
+                    missing = [item for item in chunk if item["candidate_id"] not in decisions]
+                    if not missing:
+                        break
+                    output = self._agent(runner, "lead_signal_agent", {"plan": self._plan,
+                        "leadCandidates": [self._model_candidate(item) for item in missing],
+                        "noteContexts": self._note_contexts(missing),
+                        "reviewMode": "missing_batch" if attempt else "initial"}, "分类需求与信息信号")
+                    parsed = self._lead_decisions(output.get("leads") or [], missing, "retry" if attempt else "initial")
+                    decisions.update(parsed)
+                    call_ids.update({key: getattr(runner, "last_call_id", "") for key in parsed})
+            except Exception as exc:
+                batch_error = exc
+            for candidate in chunk:
+                if batch_error and candidate["candidate_id"] not in decisions:
+                    continue
+                decision = decisions.get(candidate["candidate_id"])
+                if decision is None:
+                    self._summary["failures"].append({"stage": "lead_signal", "source": candidate["candidate_id"], "error": "缺少模型判断"})
+                    self._stage_error("lead_signal", "部分候选缺少模型判断，待人工复核。")
+                    decision = {"decision": "missing_decision", "classification": "uncertain", "score": 0, "reason": "缺少模型判断，待人工复核"}
+                else:
+                    self._stage_coverage["lead_signal"]["completed"] += 1
+                original_decision = copy.deepcopy(decision)
+                decision = apply_offering_decision(candidate, decision, self._plan)
+                decision_type = str(decision.get("decision") or "ignore")
+                self._save_audit(self._task_id, [{"platform": candidate["platform"], "stage": "lead_signal", "entity_type": "note" if candidate["lead_type"] == "note_author" else "comment",
+                    "entity_id": candidate["candidate_id"], "note_id": candidate["note_id"], "decision": decision_type,
+                    "source_keyword": (candidate.get("note") or {}).get("source_keyword", ""),
+                    "call_id": call_ids.get(candidate["candidate_id"], ""),
+                    "original_decision": original_decision, "final_decision": decision,
+                    "rule_version": SERVICE_POLICY_VERSION if self._plan.get("offeringId") == "agent_custom_development" else "general",
+                    "transformation_reason": decision.get("intent_reason", "") if decision != original_decision else "",
+                    "reason": decision.get("intent_reason") or decision.get("reason", ""),
+                    "evidence": decision.get("evidence", []), "score": self._score(decision.get("score"))}])
+                lead = self._lead_from_decision(candidate, decision, self._plan)
+                lead["original_model_decision"] = original_decision
+                lead["rule_decision"] = decision
+                lead["call_id"] = call_ids.get(candidate["candidate_id"], "")
+                self._leads.append(lead)
+            self._flush("lead_signal", 75)
+            if batch_error:
+                raise batch_error
+        self._leads.sort(key=lambda x: x["score"], reverse=True)
+        self._finish_stage("lead_signal")
+
+    @staticmethod
+    def _score(value: Any) -> int:
+        try:
+            return max(0, min(100, int(value or 0)))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    def _lead_from_decision(self, candidate: dict[str, Any], decision: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+        decision = apply_offering_decision(candidate, decision, settings)
+        note, source = candidate["note"], str(candidate.get("content") or "")
+        evidence_value = decision.get("evidence") or []
+        parts = evidence_value if isinstance(evidence_value, list) else [str(evidence_value)]
+        # The model sees redacted text; verify every quotation against that same source.
+        valid = [str(part) for part in parts if isinstance(part, str) and part.strip() and part in str(redact_external(source))]
+        complete = bool(parts and len(valid) == len(parts) and candidate.get("evidenceComplete"))
+        classification = str(decision.get("classification") or "uncertain")
+        if classification not in {"demand", "information", "promotion", "uncertain", "irrelevant"}:
+            classification = "uncertain"
+        score = self._score(decision.get("score"))
+        lead_id = candidate["candidate_id"] if candidate["lead_type"] == "note_author" else f"{candidate['note_id']}:{candidate['comment_id']}"
+        if candidate["platform"] != "xhs" and not lead_id.startswith(candidate["platform"] + ":"):
+            lead_id = candidate["platform"] + ":" + lead_id
+        qualified = decision.get("decision") == "lead" and score >= settings["minScore"] and complete
+        if settings.get("offeringId") == "agent_custom_development":
+            qualified = qualified and classification == "demand" and complete and decision.get("demand_origin") == "self"
+        return {"platform": candidate["platform"], "lead_id": lead_id, "lead_type": candidate["lead_type"],
+            "comment_id": candidate["comment_id"], "source_comment_id": candidate["source_comment_id"],
+            "id_is_synthetic": candidate["id_is_synthetic"],
+            "note_id": candidate["note_id"], "post_id": candidate["post_id"],
+            "user_id": candidate["user_id"], "target_user_id": candidate["user_id"], "nickname": candidate["nickname"],
+            "profile_url": candidate["profile_url"], "content": source, "evidence": "；".join(valid),
+            "evidenceComplete": complete, "sourceRefs": candidate["sourceRefs"], "collectedAt": candidate["collectedAt"],
+            "classification": classification, "preQaQualified": bool(qualified), "qualified": False,
+            "score": score, "priority": "A" if score >= 85 else "B" if score >= 70 else "C",
+            **{key: decision.get(key) for key in ("intent_role", "service_fit", "demand_origin",
+                                                "customization_evidence", "commissioning_evidence", "intent_reason")},
+            "confidence": decision.get("confidence", 0), "demand_summary": decision.get("demand_summary", ""),
+            "reason": decision.get("reason", ""), "risk": decision.get("risk", ""), "stage": decision.get("stage", "待人工核验"),
+            **inquiry_review(candidate, decision),
+            "note_title": note.get("title", ""), "note_url": note.get("url", ""), "ip": candidate.get("ip", ""),
+            "qa_status": "pending", "qa_issues": [], "human_review_status": "pending", "feedback": "待人工判断",
+            "review_required_reason": "" if complete else "原文证据不足或引用未通过逐字校验", "source_comment": candidate}
+
+    def _review_leads(self, runner: Any) -> None:
+        self._start_stage("qa", len(self._leads))
+        self._qa = {"approved": False, "issues": [], "review_requests": [], "reviews": [],
+                    "batchCount": 0, "reviewedLeadsCount": 0, "expectedLeadsCount": len(self._leads)}
+        all_approved = True
+        for chunk in self._chunks(self._leads, 5):
+            qa = self._agent(runner, "critic_qa_agent", {"plan": self._plan,
+                "leads": [self._model_lead(lead) for lead in chunk],
+                "noteContexts": self._note_contexts([lead["source_comment"] for lead in chunk])}, "证据质检")
+            self._qa["batchCount"] += 1
+            rows = self._qa_reviews(qa, chunk)
+            missing = [lead for lead in chunk if lead["lead_id"] not in rows]
+            if missing:
+                retry = self._agent(runner, "critic_qa_agent", {"plan": self._plan,
+                    "leads": [self._model_lead(lead) for lead in missing],
+                    "noteContexts": self._note_contexts([lead["source_comment"] for lead in missing]),
+                    "reviewMode": "missing_batch"}, "补齐缺失的逐条质检")
+                self._qa["batchCount"] += 1
+                rows.update(self._qa_reviews(retry, missing))
+                qa["issues"] = [*qa.get("issues", []), *retry.get("issues", [])]
+                qa["review_requests"] = [*qa.get("review_requests", []), *retry.get("review_requests", [])]
+            qa["reviews"] = list(rows.values())
+            reviewed = len(rows)
+            if reviewed != len(chunk):
+                error = "部分候选缺少逐条质检结果，未将缺失项视为通过。"
+                self._stage_error("qa", error)
+                self._summary["failures"].append({"stage": "qa", "error": error})
+            self._apply_qa(chunk, qa)
+            # Global/plan errors remain aggregate failures without falsely
+            # assigning them to every individually approved candidate.
+            batch_approved = all(lead["qa_status"] == "approved" for lead in chunk) and not any(
+                isinstance(issue, dict) and issue.get("level") == "error"
+                for issue in qa.get("issues", []))
+            all_approved = all_approved and batch_approved
+            self._qa["issues"].extend(qa.get("issues") or [])
+            self._qa["review_requests"].extend(qa.get("review_requests") or [])
+            self._qa["reviews"].extend(qa.get("reviews") or [])
+            self._qa["reviewedLeadsCount"] += reviewed
+            self._stage_coverage["qa"]["completed"] += reviewed
+            self._qa["approved"] = all_approved and self._qa["reviewedLeadsCount"] == len(self._leads)
+            self._flush("qa", 85)
+        self._finish_stage("qa")
+
+    @staticmethod
+    def _qa_reviews(qa: dict[str, Any], leads: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        allowed = {lead["lead_id"] for lead in leads}
+        rows = [row for row in qa.get("reviews", []) if isinstance(row, dict)]
+        counts = Counter(str(row.get("target_id")) for row in rows)
+        return {str(row["target_id"]): row for row in rows
+                if str(row.get("target_id")) in allowed and counts[str(row["target_id"])] == 1
+                and row.get("status") in {"approved", "needs_review", "rejected"}}
+
+    def _apply_qa(self, leads: list[dict[str, Any]], qa: dict[str, Any]) -> None:
+        reviews = {str(x.get("target_id")): x for x in qa.get("reviews", []) if isinstance(x, dict)}
+        for lead in leads:
+            issues = [x for x in qa.get("issues", []) if isinstance(x, dict) and str(x.get("target_id")) == lead["lead_id"]]
+            lead["qa_issues"] = issues
+            review = reviews.get(lead["lead_id"], {})
+            status = review.get("status")
+            lead["qa_status"] = "rejected" if any(x.get("level") == "error" for x in issues) else (
+                "needs_review" if issues or not lead["evidenceComplete"] else
+                status if status in {"approved", "needs_review", "rejected"} else "needs_review")
+            lead["qa_review_requests"] = [x for x in qa.get("review_requests", [])
+                if isinstance(x, dict) and str(x.get("target_id")) == lead["lead_id"]]
+            lead["business_review_required"] = bool(lead["qa_review_requests"] or lead.get("classification") == "uncertain")
+            lead["qa_reason"] = review.get("reason") or ("逐条质检结果缺失，不能视为通过" if not review else "")
+            if issues:
+                lead["review_required_reason"] = "；".join(str(x.get("message", "")) for x in issues)
+            # A model's initial qualification is not a verified result. Preserve
+            # it separately; missing or disputed QA must not enter qualified totals.
+            lead["qualified"] = bool(lead.get("preQaQualified")) and lead["qa_status"] == "approved"
+            if lead["preQaQualified"] and not lead["qualified"]:
+                lead["qualification_reason"] = "初步研判符合，但证据质检尚未通过：" + (
+                    lead.get("qa_reason") or lead.get("review_required_reason") or "需要逐条复核")
+
+    def _comment_brief(self, comment: dict[str, Any], note: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+        platform = note.get("platform", "xhs")
+        user = comment.get("user_info") or {}
+        content = str(comment.get("content") or "")
+        user_id = str(user.get("sec_user_id") or user.get("user_id") or "")
+        supplied_id = str((comment.get("source_comment_id") if "source_comment_id" in comment else comment.get("id") or comment.get("comment_id")) or "")
+        if comment.get("id_is_synthetic"):
+            supplied_id = ""
+        comment_id = supplied_id
+        if not comment_id:
+            timestamp = comment.get("create_time") or comment.get("createTime")
+            # An anonymous repeated message is not proof of the same comment.
+            # Only identifiable author/time pairs can share a fallback key.
+            identity = json.dumps([platform, str(note["id"]), user_id, timestamp, content], ensure_ascii=False)
+            suffix = hashlib.sha256(identity.encode()).hexdigest() if user_id and timestamp else uuid.uuid4().hex
+            comment_id = "missing-" + suffix
+        return {"platform": platform, "candidate_id": f"{platform}:{note['id']}:{comment_id}",
+                "lead_type": "comment_lead", "comment_id": comment_id, "note_id": note["id"],
+                "source_comment_id": supplied_id, "id_is_synthetic": not bool(supplied_id),
+                "post_id": note.get("post_id") or note["id"], "user_id": user_id,
+                "nickname": user.get("nickname") or user.get("nick_name") or "", "profile_url": self._profile_url(platform, user_id),
+                "content": content, "ip": comment.get("ip_location", ""), "note": self._note_brief(note),
+                "collectedAt": time.time(), "evidenceComplete": bool(supplied_id and content and note.get("url")),
+                "sourceRefs": [{"platform": platform, "noteId": note["id"], "commentId": supplied_id, "url": note.get("url", "")} ]}
+
+    def _note_author_candidates(self, notes: list[dict[str, Any]], settings: dict[str, Any]) -> list[dict[str, Any]]:
+        candidates = []
+        for note in notes:
+            candidate = self._comment_brief({"content": note_content(note),
+                 "user_info": {"user_id": note.get("author_user_id", ""), "nickname": note.get("author", "")}}, note, settings)
+            candidate.update(candidate_id=("" if note["platform"] == "xhs" else note["platform"] + ":") + "note:" + str(note["id"]),
+                lead_type="note_author", comment_id="", source_comment_id="", id_is_synthetic=False,
+                evidenceComplete=bool(note.get("evidenceComplete")),
+                sourceRefs=note["sourceRefs"], collectedAt=note["collectedAt"])
+            candidates.append(candidate)
+        return candidates
+
+    def _note_brief(self, note: dict[str, Any]) -> dict[str, Any]:
+        return {"platform": note.get("platform", "xhs"), "note_id": note["id"], "post_id": note.get("post_id", note["id"]),
+                **{key: note.get(key) for key in ("title", "desc", "tags", "url", "source_keyword", "evidenceComplete", "sourceRefs", "collectedAt",
+                                                "images", "image_status", "image_evidence", "content_gap")}}
+
+    @staticmethod
+    def _model_note(note: dict[str, Any]) -> dict[str, Any]:
+        return {**{key: note.get(key) for key in ("platform", "note_id", "title", "desc", "tags",
+                                               "source_keyword", "evidenceComplete", "image_status", "content_gap")},
+                "image_evidence": [{key: row.get(key) for key in ("index", "status", "text", "visual_description", "uncertain_regions")}
+                                   for row in note.get("image_evidence") or []]}
+
+    @staticmethod
+    def _model_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+        return {key: candidate.get(key) for key in ("platform", "candidate_id", "note_id", "comment_id",
+                                                    "lead_type", "content", "evidenceComplete")}
+
+    def _note_contexts(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        contexts = {}
+        for candidate in candidates:
+            if candidate.get("lead_type") == "note_author" and not (candidate.get("note") or {}).get("image_evidence"):
+                # Author content already contains the full title and body.
+                continue
+            note = candidate.get("note") or {}
+            identity = (candidate.get("platform"), candidate.get("note_id"))
+            contexts[identity] = self._model_note(note)
+        return list(contexts.values())
+
+    @staticmethod
+    def _model_lead(lead: dict[str, Any]) -> dict[str, Any]:
+        return {key: lead.get(key) for key in (
+            "platform", "lead_id", "lead_type", "note_id", "comment_id", "content", "evidence",
+            "evidenceComplete", "classification", "qualified", "score", "confidence", "demand_summary", "reason",
+            "risk", "intent_role", "service_fit", "demand_origin", "customization_evidence",
+            "commissioning_evidence", "intent_reason", "preQaQualified", "qa_status", "qa_reason",
+            "qualification_reason", "business_review_required",
+        )}
+
+    def _flush(self, stage: str, percent: int | None) -> None:
+        # The confirmed metric orders retained sources and subsequent scanning;
+        # it does not alter the keyword/platform collection quotas.
+        self._notes.sort(key=lambda note: note.get(self._plan["metric"], 0), reverse=True)
+        self._refresh_content_coverage()
+        self._summary["notesCollected"] = len(self._notes)
+        self._summary["commentsCollected"] = len(self._comments)
+        self._summary["unprocessedNotes"] = max(0, self._summary["receivedNotes"] - len(self._notes)
+                                               - sum(self._summary["filterCounts"].values()))
+        if self.storage and self._task_id:
+            for note in self._notes:
+                identity = (str(note.get("platform", "xhs")), str(note["id"]))
+                fingerprint = self._row_fingerprint(note)
+                if self._saved_note_fingerprints.get(identity) != fingerprint:
+                    self.storage.save_note(self._task_id, note)
+                    self._saved_note_fingerprints[identity] = fingerprint
+            for lead in self._leads:
+                identity = (str(lead.get("platform", "xhs")), str(lead["lead_id"]))
+                fingerprint = self._row_fingerprint(lead)
+                if self._saved_lead_fingerprints.get(identity) != fingerprint:
+                    self.storage.save_lead(self._task_id, lead)
+                    self._saved_lead_fingerprints[identity] = fingerprint
+        if percent is not None:
+            self._last_progress_percent = percent
+        self._progress({"stage": stage, "percent": self._last_progress_percent,
+                        "current": len(self._notes), "total": self._summary["effectiveMaxNotes"]})
+        if self._snapshot:
+            self._snapshot(copy.deepcopy(self._result()))
+
+    @staticmethod
+    def _row_fingerprint(row: dict[str, Any]) -> str:
+        serialized = canonical_json(row)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _result(self) -> dict[str, Any]:
+        trace = self.storage.list_agent_runs(self._task_id) if self.storage and self._task_id else []
+        return {"taskId": self._task_id, "status": self._status, "errorText": self._error,
+                "keyword": "、".join(self._plan["keywords"]), "demandDescription": self._plan["searchGoal"],
+                "confirmedPlan": self._plan, "platforms": self._plan["platforms"], "runId": self._active_run_id,
+                "runType": self._active_run_type, "count": len(self._notes), "notes": self._notes,
+                "metric": self._plan["metric"], "metricLabel": METRIC_LABELS[self._plan["metric"]],
+                "scannedCommentsCount": len(self._comments), "collectionSummary": self._summary,
+                "stageCoverage": self._stage_coverage,
+                "leads": {"keyword": "、".join(self._plan["keywords"]), "scannedNotesCount": len(self._notes),
+                          "totalCommentsScanned": len(self._comments), "leadsCount": len(self._leads),
+                          "qualifiedCount": sum(1 for x in self._leads if x.get("qualified")),
+                          "minScore": self._plan["minScore"], "leads": self._leads},
+                "report": self._report, "qa": self._qa, "agentTrace": trace, "auditTrail": self._audit_from_trace(trace),
+                "taskSummary": {"task_summary": f"已采集 {len(self._notes)} 条内容、{len(self._comments)} 条评论；候选 {len(self._leads)} 条，需人工核验。"},
+                "harness": {"mode": "multi-agent-llm", "runId": self._active_run_id},
+                "safety": {"mode": "read-only", "actions": "采集只读；触达通过独立人工确认动作执行。"}}
 
     def _adapter_for(self, platform: str) -> Any:
         if hasattr(self.adapter, "adapter_for"):
             return self.adapter.adapter_for(platform)
         return self.adapter
 
-    def _platform_label(self, platform: str) -> str:
-        return {"xhs": "小红书", "douyin": "抖音"}.get(str(platform or ""), str(platform or "未知平台"))
 
-    def _keywords(self, planning: dict[str, Any]) -> list[str]:
-        keywords = [str(item).strip() for item in planning.get("keywords") or [] if str(item).strip()]
-        seen: set[str] = set()
-        result = []
-        for keyword in keywords:
-            if keyword not in seen:
-                seen.add(keyword)
-                result.append(keyword)
-        if not result:
-            raise RuntimeError("搜索规划 Agent 未返回可执行关键词，Harness 已停止，避免退回规则伪装 AI。")
-        return result[:12]
 
-    def _collect_raw_notes(
-        self,
-        keywords: list[str],
-        settings: dict[str, Any],
-        page: int,
-        task_id: int | None,
-        stop_checker: Any | None,
-        emit: Any,
-        progress: Any,
-    ) -> list[dict[str, Any]]:
-        notes: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        now = time.time()
-        platforms = settings.get("platforms") or ["xhs"]
-        total_steps = max(1, len(keywords) * len(platforms))
-        step = 0
-        for index, keyword in enumerate(keywords, 1):
-            for platform in platforms:
-                if stop_checker and stop_checker():
-                    break
-                step += 1
-                label = self._platform_label(platform)
-                emit("info", "工具 Harness", f"只读搜索{label}「{keyword}」第 {page} 页...")
-                raw = self._adapter_for(platform).search(keyword, page=page)
-                items = (raw.get("data") or {}).get("items") or []
-                audit_items = []
-                for item in items:
-                    note = extract_note({**item, "platform": platform})
-                    if not note:
-                        audit_items.append({
-                            "platform": platform,
-                            "stage": "search",
-                            "entity_type": "note",
-                            "entity_id": str(item.get("id") or ""),
-                            "source_keyword": keyword,
-                            "decision": "parse_failed",
-                            "reason": f"{label}搜索结果无法解析为有效作品。",
-                            "payload": {"rawId": item.get("id"), "modelType": item.get("model_type")},
-                        })
-                        continue
-                    note["platform"] = platform
-                    dedupe_id = f"{platform}:{note['id']}"
-                    if dedupe_id in seen:
-                        audit_items.append({
-                            "platform": platform,
-                            "stage": "search",
-                            "entity_type": "note",
-                            "entity_id": note["id"],
-                            "note_id": note["id"],
-                            "source_keyword": keyword,
-                            "decision": "dropped_duplicate",
-                            "reason": "同一任务中该作品已由其他关键词命中。",
-                            "payload": self._note_brief(note),
-                        })
-                        continue
-                    if not within_time_filter(note, settings["timeFilter"], now):
-                        audit_items.append({
-                            "platform": platform,
-                            "stage": "search",
-                            "entity_type": "note",
-                            "entity_id": note["id"],
-                            "note_id": note["id"],
-                            "source_keyword": keyword,
-                            "decision": "dropped_time_filter",
-                            "reason": f"发布时间不满足时效过滤：{settings['timeFilter']}。",
-                            "payload": self._note_brief(note),
-                        })
-                        continue
-                    note["source_keyword"] = keyword
-                    seen.add(dedupe_id)
-                    notes.append(note)
-                    audit_items.append({
-                        "platform": platform,
-                        "stage": "search",
-                        "entity_type": "note",
-                        "entity_id": note["id"],
-                        "note_id": note["id"],
-                        "source_keyword": keyword,
-                        "decision": "collected",
-                        "reason": f"{label}搜索返回并通过基础去重与时效过滤，进入 LLM 相关性判断池。",
-                        "payload": self._note_brief(note),
-                    })
-                self._save_audit(task_id, audit_items)
-                progress({"stage": "search", "percent": 10 + int(18 * step / total_steps), "current": step, "total": total_steps})
-                emit("success", "工具 Harness", f"{label}搜索「{keyword}」返回 {len(items)} 条，进入 LLM 相关性判断池。")
-            if stop_checker and stop_checker():
-                break
-        limit = settings["count"] * max(2, len(keywords))
-        selected = self._balanced_candidate_pool(notes, settings, limit)
-        selected_ids = {f"{note.get('platform') or 'xhs'}:{note.get('id')}" for note in selected}
-        dropped = [
-            note for note in notes
-            if f"{note.get('platform') or 'xhs'}:{note.get('id')}" not in selected_ids
-        ]
-        if dropped:
-            self._save_audit(task_id, [
-                {
-                    "platform": note.get("platform") or "xhs",
-                    "stage": "search",
-                    "entity_type": "note",
-                    "entity_id": note.get("id"),
-                    "note_id": note.get("id"),
-                    "source_keyword": note.get("source_keyword", ""),
-                    "decision": "dropped_candidate_cap",
-                    "reason": "多平台候选池已达到相关性判断上限，按平台均衡配额后暂不送入 LLM。",
-                    "payload": {
-                        "note": self._note_brief(note),
-                        "candidate_limit": limit,
-                        "platforms": settings.get("platforms") or [],
-                    },
-                }
-                for note in dropped
-            ])
-        return selected
-
-    def _balanced_candidate_pool(self, notes: list[dict[str, Any]], settings: dict[str, Any], limit: int) -> list[dict[str, Any]]:
-        metric = settings["metric"]
-        platforms = settings.get("platforms") or ["xhs"]
-        if not notes or limit <= 0:
-            return []
-        if len(platforms) <= 1:
-            return sorted(notes, key=lambda note: note.get(metric, 0), reverse=True)[:limit]
-
-        buckets: dict[str, list[dict[str, Any]]] = {platform: [] for platform in platforms}
-        overflow: list[dict[str, Any]] = []
-        for note in notes:
-            platform = str(note.get("platform") or "xhs")
-            if platform in buckets:
-                buckets[platform].append(note)
-            else:
-                overflow.append(note)
-        for bucket in buckets.values():
-            bucket.sort(key=lambda note: note.get(metric, 0), reverse=True)
-        overflow.sort(key=lambda note: note.get(metric, 0), reverse=True)
-
-        base_quota = max(1, limit // max(1, len(platforms)))
-        remainder = max(0, limit - base_quota * len(platforms))
-        selected: list[dict[str, Any]] = []
-        selected_keys: set[str] = set()
-        for index, platform in enumerate(platforms):
-            quota = base_quota + (1 if index < remainder else 0)
-            for note in buckets.get(platform, [])[:quota]:
-                key = f"{note.get('platform') or 'xhs'}:{note.get('id')}"
-                selected.append(note)
-                selected_keys.add(key)
-
-        remaining = [
-            note for bucket in [*buckets.values(), overflow] for note in bucket
-            if f"{note.get('platform') or 'xhs'}:{note.get('id')}" not in selected_keys
-        ]
-        remaining.sort(key=lambda note: note.get(metric, 0), reverse=True)
-        for note in remaining:
-            if len(selected) >= limit:
-                break
-            selected.append(note)
-        selected.sort(key=lambda note: note.get(metric, 0), reverse=True)
-        return selected[:limit]
-
-    def _judge_relevance(
-        self,
-        runner: StructuredAgentRunner,
-        notes: list[dict[str, Any]],
-        planning: dict[str, Any],
-        settings: dict[str, Any],
-        task_id: int | None,
-        stop_checker: Any | None,
-        emit: Any,
-    ) -> list[dict[str, Any]]:
-        if not notes:
-            return []
-        emit("info", "相关性判断 Agent", f"LLM 批量判断 {len(notes)} 篇候选笔记相关性...")
-        payload = {
-            "demandDescription": settings["demandDescription"],
-            "businessDirection": settings["businessDirectionLabel"],
-            "strategy": self._strategy_context(settings, planning),
-            "hypotheses": planning.get("hypotheses", []),
-            "notes": [self._note_brief(note) for note in notes],
-            "outputContract": {
-                "coverage": "Return one notes[] item for every input note_id.",
-                "decisions": ["keep", "drop"],
-            },
-        }
-        result = runner.run("relevance_agent", payload, purpose="批量笔记相关性判断")
-        decisions = self._note_decisions(result.get("notes") or [], coverage_status="initial")
-        missing_notes = [note for note in notes if str(note.get("id")) not in decisions]
-        if missing_notes:
-            emit("info", "相关性判断 Agent", f"补齐 {len(missing_notes)} 篇缺失相关性判断...")
-            for chunk in self._chunks(missing_notes, 12):
-                if stop_checker and stop_checker():
-                    break
-                retry = runner.run(
-                    "relevance_agent",
-                    {
-                        "reviewMode": "missing_batch",
-                        "demandDescription": settings["demandDescription"],
-                        "businessDirection": settings["businessDirectionLabel"],
-                        "strategy": self._strategy_context(settings, planning),
-                        "hypotheses": planning.get("hypotheses", []),
-                        "notes": [self._note_brief(note) for note in chunk],
-                        "outputContract": {
-                            "coverage": "Return one notes[] item for every input note_id. Do not omit low-confidence or drop decisions.",
-                            "decisions": ["keep", "drop"],
-                        },
-                    },
-                    purpose="相关性缺失决策补齐",
-                )
-                decisions.update(self._note_decisions(retry.get("notes") or [], coverage_status="retry"))
-            missing_notes = [note for note in notes if str(note.get("id")) not in decisions]
-            emit(
-                "success" if not missing_notes else "warning",
-                "相关性判断 Agent",
-                f"相关性覆盖率 {len(notes) - len(missing_notes)}/{len(notes)}。",
-            )
-        selected = []
-        audit_items = []
-        for note in notes:
-            decision = decisions.get(str(note.get("id"))) or {}
-            note["relevance"] = decision
-            decision_value = str(decision.get("decision", "")).lower()
-            final_decision = decision_value if decision_value in {"keep", "drop"} else "missing_decision"
-            if final_decision == "keep":
-                selected.append(note)
-            audit_items.append({
-                "platform": note.get("platform") or "xhs",
-                "stage": "relevance",
-                "entity_type": "note",
-                "entity_id": note.get("id"),
-                "note_id": note.get("id"),
-                "source_keyword": note.get("source_keyword", ""),
-                "decision": final_decision,
-                "reason": decision.get("reason") or ("相关性 Agent 未返回该笔记判断。" if final_decision == "missing_decision" else ""),
-                "evidence": decision.get("evidence") or [],
-                "confidence": decision.get("confidence"),
-                "payload": {
-                    "note": self._note_brief(note),
-                    "decision": decision,
-                    "coverage_status": decision.get("coverage_status") or ("missing_after_retry" if final_decision == "missing_decision" else "initial"),
-                },
-            })
-        self._save_audit(task_id, audit_items)
-        review_targets = [
-            note for note in selected
-            if float((note.get("relevance") or {}).get("confidence") or 0) < 0.6
-        ][:5]
-        if review_targets:
-            emit("info", "相关性判断 Agent", f"复审 {len(review_targets)} 篇低置信相关笔记...")
-            for note in review_targets:
-                if stop_checker and stop_checker():
-                    break
-                review = runner.run(
-                    "relevance_agent",
-                    {"reviewMode": "single", "demandDescription": settings["demandDescription"], "businessDirection": settings["businessDirectionLabel"], "strategy": self._strategy_context(settings, planning), "note": self._note_brief(note)},
-                    purpose="自适应相关性复审",
-                )
-                decision = (review.get("notes") or [{}])[0]
-                note["relevance_review"] = decision
-                if decision and str(decision.get("decision", "")).lower() == "drop":
-                    self._save_audit(task_id, [{
-                        "platform": note.get("platform") or "xhs",
-                        "stage": "relevance",
-                        "entity_type": "note",
-                        "entity_id": note.get("id"),
-                        "note_id": note.get("id"),
-                        "source_keyword": note.get("source_keyword", ""),
-                        "decision": "drop",
-                        "reason": "低置信复审后丢弃：" + str(decision.get("reason") or ""),
-                        "evidence": decision.get("evidence") or [],
-                        "confidence": decision.get("confidence"),
-                        "payload": {"note": self._note_brief(note), "review": decision},
-                    }])
-                    selected = [item for item in selected if item.get("id") != note.get("id")]
-        emit("success", "相关性判断 Agent", f"LLM 保留 {len(selected)} 篇相关笔记。")
-        return selected
-
-    def _enrich_notes(
-        self,
-        notes: list[dict[str, Any]],
-        settings: dict[str, Any],
-        stop_checker: Any | None,
-        emit: Any,
-        progress: Any,
-    ) -> list[dict[str, Any]]:
-        enriched = []
-        for idx, note in enumerate(notes):
-            if stop_checker and stop_checker():
-                break
-            if idx > 0 and settings["delayMax"] > 0:
-                emit("info", "延迟保护", f"合规延迟后读取详情：{note.get('title', '')[:24]}")
-                time.sleep(random.uniform(settings["delayMin"], settings["delayMax"]))
-            try:
-                platform = str(note.get("platform") or "xhs")
-                emit("info", "工具 Harness", f"只读读取{self._platform_label(platform)}详情 {idx + 1}/{len(notes)}：{note.get('title', '')[:24]}")
-                detail_raw = self._adapter_for(platform).read_note(note["id"])
-                detail_items = (detail_raw.get("data") or {}).get("items") or []
-                detail = extract_note({**detail_items[0], "platform": platform}) if detail_items else None
-                merged = merge_note(note, detail)
-                merged["platform"] = platform
-                enriched.append(merged)
-            except Exception as exc:
-                note["read_error"] = str(exc)[:300]
-                enriched.append(note)
-                emit("warning", "工具 Harness", f"读取详情失败：{note.get('title', '')[:24]}", {"error": str(exc)[:300]})
-            progress({"stage": "read_detail", "percent": 42 + int(12 * (idx + 1) / max(1, len(notes))), "current": idx + 1, "total": len(notes)})
-        return enriched
-
-    def _collect_comments(
-        self,
-        notes: list[dict[str, Any]],
-        settings: dict[str, Any],
-        task_id: int | None,
-        stop_checker: Any | None,
-        emit: Any,
-        progress: Any,
-    ) -> tuple[list[dict[str, Any]], int]:
-        comments = []
-        total = 0
-        for idx, note in enumerate(notes):
-            if stop_checker and stop_checker():
-                break
-            if idx > 0 and settings["delayMax"] > 0:
-                emit("info", "延迟保护", f"合规延迟后读取评论：{note.get('title', '')[:24]}")
-                time.sleep(random.uniform(settings["delayMin"], settings["delayMax"]))
-            try:
-                platform = str(note.get("platform") or "xhs")
-                max_comments = int((settings.get("maxCommentsByPlatform") or {}).get(platform) or settings.get("maxCommentsPerNote") or 50)
-                label = self._platform_label(platform)
-                emit("info", "工具 Harness", f"只读扫描{label}评论 {idx + 1}/{len(notes)}：{note.get('title', '')[:24]}（最多 {max_comments} 条）")
-                cursor = ""
-                note_seen: set[str] = set()
-                note_scanned = 0
-                pages = 0
-                while note_scanned < max_comments:
-                    raw = self._adapter_for(platform).comments(note["id"], cursor=cursor)
-                    page_data = raw.get("data") or raw
-                    raw_comments = page_data.get("comments") or []
-                    pages += 1
-                    if not raw_comments:
-                        break
-                    for comment in raw_comments:
-                        if note_scanned >= max_comments:
-                            break
-                        normalized = self._comment_brief({**comment, "platform": platform}, note, settings)
-                        if normalized["comment_id"] in note_seen:
-                            continue
-                        note_seen.add(normalized["comment_id"])
-                        comments.append(normalized)
-                        note_scanned += 1
-                        total += 1
-                        if self.storage and task_id:
-                            self.storage.save_comment(task_id, note["id"], {**comment, "id": normalized["comment_id"], "platform": platform})
-                    if note_scanned >= max_comments:
-                        break
-                    cursor = str(page_data.get("cursor") or "")
-                    if not page_data.get("has_more") or not cursor:
-                        break
-                note["scanned_comments_count"] = note_scanned
-                note["comment_pages_fetched"] = pages
-            except Exception as exc:
-                note["comment_error"] = str(exc)[:300]
-                emit("warning", "工具 Harness", f"评论扫描失败：{note.get('title', '')[:24]}", {"error": str(exc)[:300]})
-            progress({"stage": "comments", "percent": 56 + int(10 * (idx + 1) / max(1, len(notes))), "current": idx + 1, "total": len(notes)})
-        return comments, total
-
-    def _judge_leads(
-        self,
-        runner: StructuredAgentRunner,
-        notes: list[dict[str, Any]],
-        comments: list[dict[str, Any]],
-        settings: dict[str, Any],
-        task_id: int | None,
-        stop_checker: Any | None,
-        emit: Any,
-    ) -> list[dict[str, Any]]:
-        lead_candidates = [*comments, *self._note_author_candidates(notes, settings)]
-        if not lead_candidates:
-            return []
-        emit("info", "线索识别 Agent", f"LLM 批量识别 {len(lead_candidates)} 个评论/作者候选销售意图...")
-        result = runner.run(
-            "lead_signal_agent",
-            {
-                "demandDescription": settings["demandDescription"],
-                "businessDirection": settings["businessDirectionLabel"],
-                "strategy": self._strategy_context(settings, settings.get("planning") or {}),
-                "notes": [self._note_brief(n) for n in notes],
-                "comments": lead_candidates,
-                "leadCandidates": lead_candidates,
-                "outputContract": {
-                    "coverage": "Return one leads[] item for every input candidate_id.",
-                    "decisions": ["lead", "ignore", "below_threshold"],
-                    "leadProfiles": ["buyer_enterprise", "buyer_individual_high_intent", "peer_vendor", "personal_learning", "unknown"],
-                    "requiredFields": ["candidate_id", "lead_type", "note_id", "comment_id", "decision", "score", "priority", "lead_profile", "confidence", "reason", "risk"],
-                },
-            },
-            purpose="批量线索信号识别",
-        )
-        decisions = self._lead_decisions(result.get("leads") or [], lead_candidates, coverage_status="initial")
-        missing_candidates = [item for item in lead_candidates if item["candidate_id"] not in decisions]
-        if missing_candidates:
-            emit("info", "线索识别 Agent", f"补齐 {len(missing_candidates)} 个缺失线索判断...")
-            for chunk in self._chunks(missing_candidates, 20):
-                if stop_checker and stop_checker():
-                    break
-                retry = runner.run(
-                    "lead_signal_agent",
-                    {
-                        "reviewMode": "missing_batch",
-                        "demandDescription": settings["demandDescription"],
-                        "businessDirection": settings["businessDirectionLabel"],
-                        "strategy": self._strategy_context(settings, settings.get("planning") or {}),
-                        "notes": [self._note_brief(n) for n in notes],
-                        "comments": chunk,
-                        "leadCandidates": chunk,
-                        "outputContract": {
-                            "coverage": "Return one leads[] item for every input candidate_id, including ignore decisions.",
-                            "decisions": ["lead", "ignore", "below_threshold"],
-                            "leadProfiles": ["buyer_enterprise", "buyer_individual_high_intent", "peer_vendor", "personal_learning", "unknown"],
-                            "requiredFields": ["candidate_id", "lead_type", "note_id", "comment_id", "decision", "score", "priority", "lead_profile", "confidence", "reason", "risk"],
-                        },
-                    },
-                    purpose="线索缺失决策补齐",
-                )
-                decisions.update(self._lead_decisions(retry.get("leads") or [], chunk, coverage_status="retry"))
-            missing_candidates = [item for item in lead_candidates if item["candidate_id"] not in decisions]
-            emit(
-                "success" if not missing_candidates else "warning",
-                "线索识别 Agent",
-                f"线索判断覆盖率 {len(lead_candidates) - len(missing_candidates)}/{len(lead_candidates)}。",
-            )
-        leads = []
-        audit_items = []
-        for comment in lead_candidates:
-            decision = decisions.get(comment["candidate_id"]) or {}
-            raw_decision = str(decision.get("decision", "")).lower()
-            lead_profile = self._lead_profile(decision, comment)
-            if decision:
-                decision["lead_profile"] = lead_profile
-            score = min(max(int(decision.get("score") or 0), 0), 100)
-            if lead_profile in {"peer_vendor", "personal_learning"}:
-                score = min(score, 45)
-                decision["score"] = score
-                decision["risk"] = self._append_text(decision.get("risk"), self._lead_profile_risk(lead_profile))
-                if raw_decision == "lead":
-                    raw_decision = "below_threshold"
-                    decision["decision"] = "below_threshold"
-            if not decision:
-                audit_items.append(self._lead_audit_item(comment, decision, "missing_decision", "线索识别 Agent 首轮和补齐轮均未返回该候选判断。"))
-                continue
-            if raw_decision not in {"lead", "below_threshold"}:
-                audit_items.append(self._lead_audit_item(comment, decision, "ignore", "线索识别 Agent 判断为非商机。"))
-                continue
-            if raw_decision == "below_threshold" or score < settings["minScore"]:
-                audit_items.append(self._lead_audit_item(comment, decision, "below_threshold", f"评分 {score} 低于阈值 {settings['minScore']}。"))
-                continue
-            lead = self._lead_from_decision(comment, decision, settings)
-            self._apply_geo_gate(lead, settings)
-            if int(lead.get("score") or 0) < settings["minScore"]:
-                audit_decision = dict(decision)
-                if lead.get("geo_status") == "mismatch" and lead.get("geo_reason"):
-                    audit_decision["reason"] = str(lead.get("geo_reason"))
-                audit_items.append(self._lead_audit_item(comment, audit_decision, "below_threshold", lead.get("geo_reason") or f"评分低于阈值 {settings['minScore']}。", lead=lead))
-                continue
-            audit_items.append(self._lead_audit_item(comment, decision, "lead", "达到线索阈值，进入产品策略阶段。", lead=lead))
-            leads.append(lead)
-        self._save_audit(task_id, audit_items)
-        review_targets = [
-            lead for lead in leads
-            if float(lead.get("confidence") or 0) < 0.6 or lead.get("priority") == "A"
-        ][:8]
-        if review_targets:
-            emit("info", "线索识别 Agent", f"自适应复审 {len(review_targets)} 条低置信/高价值线索...")
-            for lead in review_targets:
-                if stop_checker and stop_checker():
-                    break
-                review = runner.run(
-                    "lead_signal_agent",
-                    {
-                        "reviewMode": "single",
-                        "demandDescription": settings["demandDescription"],
-                        "strategy": self._strategy_context(settings, settings.get("planning") or {}),
-                        "lead": lead,
-                        "sourceComment": lead.get("source_comment", {}),
-                    },
-                    purpose="自适应线索复审",
-                )
-                updated = (review.get("leads") or [{}])[0]
-                if updated:
-                    lead["review"] = updated
-                    lead["confidence"] = float(updated.get("confidence") or lead.get("confidence") or 0)
-                    lead["risk"] = updated.get("risk") or lead.get("risk")
-                    lead["reason"] = updated.get("reason") or lead.get("reason")
-                    lead["lead_profile"] = self._lead_profile(updated, lead.get("source_comment") or {})
-                    if str(updated.get("decision", "")).lower() == "ignore":
-                        lead["priority"] = "D"
-                        lead["score"] = min(int(lead.get("score") or 0), 30)
-                        self._save_audit(task_id, [self._lead_audit_item(lead.get("source_comment") or {}, updated, "ignore", "自适应复审后改判为非商机。")])
-        leads = [lead for lead in leads if int(lead.get("score") or 0) >= settings["minScore"]]
-        leads.sort(key=lambda lead: int(lead.get("score") or 0), reverse=True)
-        emit("success", "线索识别 Agent", f"LLM 识别 {len(leads)} 条达标线索。")
-        return leads
-
-    def _apply_product_strategy(
-        self,
-        runner: StructuredAgentRunner,
-        leads: list[dict[str, Any]],
-        notes: list[dict[str, Any]],
-        settings: dict[str, Any],
-        task_id: int | None,
-        emit: Any,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        if not leads:
-            self._audit_stage(
-                task_id,
-                stage="product_strategy",
-                agent_key="product_strategy_agent",
-                decision="skipped",
-                reason="没有达到阈值的线索，产品策略阶段跳过。",
-                payload={"leads_count": 0},
-            )
-            return [], []
-        emit("info", "产品策略 Agent", "匹配产品方向并生成低打扰人工话术...")
-        result = runner.run(
-            "product_strategy_agent",
-            {
-                "demandDescription": settings["demandDescription"],
-                "businessDirection": settings["businessDirectionLabel"],
-                "strategy": self._strategy_context(settings, settings.get("planning") or {}),
-                "leads": leads,
-                "notes": [self._note_brief(n) for n in notes],
-                "products": self._product_labels(),
-                "outputContract": {
-                    "coverage": "Return one lead_updates[] item for every input lead_id.",
-                    "requiredFields": ["lead_id", "recommended_products", "matched_products", "demand_summary", "outreach_copy", "reason"],
-                },
-            },
-            purpose="产品匹配与人工跟进话术",
-        )
-        updates = self._product_updates(result.get("lead_updates") or [], coverage_status="initial")
-        missing_leads = [lead for lead in leads if str(lead.get("lead_id")) not in updates]
-        if missing_leads:
-            emit("info", "产品策略 Agent", f"补齐 {len(missing_leads)} 条缺失产品策略...")
-            retry = runner.run(
-                "product_strategy_agent",
-                {
-                    "reviewMode": "missing_batch",
-                    "demandDescription": settings["demandDescription"],
-                    "businessDirection": settings["businessDirectionLabel"],
-                    "strategy": self._strategy_context(settings, settings.get("planning") or {}),
-                    "leads": missing_leads,
-                    "notes": [self._note_brief(n) for n in notes],
-                    "products": self._product_labels(),
-                    "outputContract": {
-                        "coverage": "Return one lead_updates[] item for every input lead_id. Include note_author leads.",
-                        "requiredFields": ["lead_id", "recommended_products", "matched_products", "demand_summary", "outreach_copy", "reason"],
-                    },
-                },
-                purpose="产品策略缺失补齐",
-            )
-            updates.update(self._product_updates(retry.get("lead_updates") or [], coverage_status="retry"))
-            missing_leads = [lead for lead in leads if str(lead.get("lead_id")) not in updates]
-            emit(
-                "success" if not missing_leads else "warning",
-                "产品策略 Agent",
-                f"产品策略覆盖率 {len(leads) - len(missing_leads)}/{len(leads)}。",
-            )
-        audit_items = []
-        audit_items.append(self._stage_audit_item(
-            stage="product_strategy",
-            agent_key="product_strategy_agent",
-            decision="completed",
-            reason=str(result.get("decision") or f"已处理 {len(leads)} 条线索的产品策略。"),
-            evidence=result.get("evidence") or result.get("lead_updates") or [],
-            confidence=result.get("confidence"),
-            payload={
-                "leads_count": len(leads),
-                "lead_updates_count": len(updates),
-                "missing_leads": [lead.get("lead_id") for lead in missing_leads],
-                "product_distribution": result.get("productDistribution"),
-            },
-        ))
-        for lead in leads:
-            update = updates.get(str(lead.get("lead_id"))) or {}
-            lead["recommended_products"] = update.get("recommended_products") or lead.get("recommended_products") or ""
-            lead["matched_products"] = _normalize_products(update.get("matched_products") or lead.get("matched_products") or [])
-            lead["demand_summary"] = update.get("demand_summary") or lead.get("demand_summary") or ""
-            lead["outreach_copy"] = update.get("outreach_copy") or lead.get("outreach_copy") or ""
-            lead["product_reason"] = update.get("reason") or ""
-            audit_items.append({
-                "platform": lead.get("platform") or "xhs",
-                "stage": "product_strategy",
-                "entity_type": "lead",
-                "entity_id": lead.get("lead_id"),
-                "note_id": lead.get("note_id"),
-                "source_keyword": (lead.get("source_comment") or {}).get("note", {}).get("source_keyword", ""),
-                "decision": "updated" if update else "missing_decision",
-                "reason": update.get("reason") or "产品策略 Agent 未返回该线索的产品匹配结果，保留原始线索待人工确认。",
-                "evidence": lead.get("evidence") or "",
-                "score": lead.get("score"),
-                "confidence": lead.get("confidence"),
-                "priority": lead.get("priority"),
-                "risk": lead.get("risk") or "",
-                "payload": {
-                    "lead_id": lead.get("lead_id"),
-                    "lead_type": lead.get("lead_type"),
-                    "geo_status": lead.get("geo_status"),
-                    "coverage_status": update.get("coverage_status") or ("missing_after_retry" if not update else "initial"),
-                    "update": update,
-                },
-            })
-        distribution = product_distribution(leads)
-        self._save_audit(task_id, audit_items)
-        emit("success", "产品策略 Agent", f"完成 {len(distribution)} 个产品方向匹配。")
-        return leads, distribution
-
-    def _run_qa(
-        self,
-        runner: StructuredAgentRunner,
-        notes: list[dict[str, Any]],
-        leads: list[dict[str, Any]],
-        distribution: list[dict[str, Any]],
-        settings: dict[str, Any],
-        task_id: int | None,
-        emit: Any,
-    ) -> dict[str, Any]:
-        emit("info", "质检风控 Agent", "检查证据一致性、幻觉风险和合规边界...")
-        qa = runner.run(
-            "critic_qa_agent",
-            {
-                "demandDescription": settings["demandDescription"],
-                "strategy": self._strategy_context(settings, settings.get("planning") or {}),
-                "notes": [self._note_brief(n) for n in notes],
-                "leads": leads,
-                "productDistribution": distribution,
-                "safety": self._safety(settings),
-            },
-            purpose="质量与安全边界检查",
-        )
-        issues = qa.get("issues") or []
-        for issue in issues:
-            target_id = str(issue.get("target_id") or "")
-            for lead in leads:
-                if target_id and target_id == str(lead.get("lead_id")):
-                    lead.setdefault("qa_issues", []).append(issue)
-        self._apply_qa_status(leads, qa)
-        audit_items = [self._stage_audit_item(
-            stage="qa",
-            agent_key="critic_qa_agent",
-            decision="approved" if qa.get("approved", True) else "needs_review",
-            reason=str(qa.get("decision") or f"QA 完成，发现 {len(issues)} 个问题。"),
-            evidence=qa.get("evidence") or issues,
-            confidence=qa.get("confidence"),
-            risk="；".join(str(item.get("message") or "") for item in issues[:5] if isinstance(item, dict)),
-            payload={
-                "approved": qa.get("approved", True),
-                "issues_count": len(issues),
-                "review_requests": qa.get("review_requests") or [],
-            },
-        )]
-        for index, issue in enumerate(issues, 1):
-            if not isinstance(issue, dict):
-                continue
-            level = str(issue.get("level") or "").lower()
-            target_id = str(issue.get("target_id") or f"issue:{index}")
-            audit_items.append({
-                "platform": self._issue_platform(issue, leads),
-                "stage": "qa",
-                "entity_type": "lead" if target_id and not target_id.startswith("issue:") else "task",
-                "entity_id": target_id,
-                "note_id": "",
-                "source_keyword": "",
-                "decision": "reject" if level == "error" else ("warning" if level == "warning" else "needs_review"),
-                "reason": str(issue.get("message") or "QA 发现需要人工复核的问题。"),
-                "evidence": issue.get("evidence") or [],
-                "confidence": qa.get("confidence"),
-                "priority": level.upper()[:1],
-                "risk": str(issue.get("suggested_action") or ""),
-                "payload": {"issue": issue, "approved": qa.get("approved", True)},
-            })
-        self._save_audit(task_id, audit_items)
-        emit("success" if qa.get("approved", True) else "warning", "质检风控 Agent", f"QA 完成，发现 {len(issues)} 个问题。", qa)
-        return qa
-
-    def _make_report(
-        self,
-        runner: StructuredAgentRunner,
-        notes: list[dict[str, Any]],
-        leads: list[dict[str, Any]],
-        distribution: list[dict[str, Any]],
-        qa: dict[str, Any],
-        settings: dict[str, Any],
-        task_id: int | None,
-        emit: Any,
-    ) -> dict[str, Any]:
-        emit("info", "报告 Agent", "生成 LLM 获客报告...")
-        report = runner.run(
-            "report_agent",
-            {
-                "demandDescription": settings["demandDescription"],
-                "businessDirection": settings["businessDirectionLabel"],
-                "strategy": self._strategy_context(settings, settings.get("planning") or {}),
-                "notesCount": len(notes),
-                "leadsCount": len(leads),
-                "topLeads": leads[:12],
-                "productDistribution": distribution,
-                "qa": qa,
-            },
-            purpose="获客报告生成",
-        )
-        report["productDistribution"] = report.get("productDistribution") or distribution
-        audit_items = [self._stage_audit_item(
-            stage="report",
-            agent_key="report_agent",
-            decision="generated",
-            reason=str(report.get("summary") or report.get("decision") or "获客报告已生成。"),
-            evidence=report.get("insights") or report.get("recommended_actions") or [],
-            confidence=report.get("confidence"),
-            risk="；".join(str(item) for item in (report.get("risks") or [])[:5]),
-            payload={
-                "summary": report.get("summary"),
-                "insights": report.get("insights"),
-                "recommended_actions": report.get("recommended_actions"),
-                "product_distribution": report.get("productDistribution"),
-            },
-        )]
-        for index, action in enumerate(report.get("recommended_actions") or [], 1):
-            audit_items.append({
-                "stage": "report",
-                "entity_type": "task",
-                "entity_id": f"recommended_action:{index}",
-                "decision": "recommended_action",
-                "reason": self._text_value(action, "报告 Agent 生成的推荐动作。"),
-                "evidence": report.get("summary") or "",
-                "confidence": report.get("confidence"),
-                "payload": {"action": action},
-            })
-        for index, risk in enumerate(report.get("risks") or [], 1):
-            audit_items.append({
-                "stage": "report",
-                "entity_type": "task",
-                "entity_id": f"risk:{index}",
-                "decision": "risk_warning",
-                "reason": self._text_value(risk, "报告 Agent 生成的风险提示。"),
-                "confidence": report.get("confidence"),
-                "risk": self._text_value(risk, ""),
-                "payload": {"risk": risk},
-            })
-        self._save_audit(task_id, audit_items)
-        emit("success", "报告 Agent", "获客报告已生成。")
-        return report
-
-    def _reflect_and_evolve(
-        self,
-        runner: StructuredAgentRunner,
-        evaluator: HarnessEvaluator,
-        task_id: int | None,
-        notes: list[dict[str, Any]],
-        leads: list[dict[str, Any]],
-        report: dict[str, Any],
-        qa: dict[str, Any],
-        emit: Any,
-    ) -> dict[str, Any]:
-        emit("info", "复盘进化 Agent", "复盘任务并生成可评估进化候选...")
-        agent_runs = self.storage.list_agent_runs(task_id) if self.storage and task_id else []
-        reflection = runner.run(
-            "reflection_evolution_agent",
-            {"notesCount": len(notes), "leadsCount": len(leads), "report": report, "qa": qa, "agentRuns": agent_runs},
-            purpose="任务复盘与进化候选生成",
-        )
-        if self.storage and task_id:
-            self.storage.save_task_summary(task_id, reflection)
-            for case in reflection.get("eval_cases") or []:
-                self.storage.save_eval_case(task_id, case)
-            self._create_prompt_candidates(task_id, reflection, evaluator)
-        audit_items = [self._stage_audit_item(
-            stage="reflection",
-            agent_key="reflection_evolution_agent",
-            decision="completed",
-            reason=str(reflection.get("evolution_summary") or reflection.get("decision") or "复盘进化 Agent 已完成。"),
-            evidence=reflection.get("evidence") or reflection.get("prompt_improvements") or [],
-            confidence=reflection.get("confidence"),
-            risk="；".join(str(item) for item in (reflection.get("risks") or [])[:5]),
-            payload={
-                "task_summary": reflection.get("task_summary"),
-                "agent_summaries_count": len(reflection.get("agent_summaries") or []),
-                "eval_cases_count": len(reflection.get("eval_cases") or []),
-                "prompt_improvements_count": len(reflection.get("prompt_improvements") or []),
-            },
-        )]
-        for item in reflection.get("agent_summaries") or []:
-            if not isinstance(item, dict):
-                continue
-            agent_key = str(item.get("agent_key") or item.get("agentKey") or item.get("agent") or item.get("agentName") or "agent")
-            audit_items.append({
-                "stage": "reflection",
-                "entity_type": "agent",
-                "entity_id": agent_key,
-                "decision": "review",
-                "reason": self._text_value(item.get("recommendation") or item.get("weaknesses") or item.get("strengths") or item, "复盘进化 Agent 生成的 Agent 表现总结。"),
-                "evidence": item.get("evidence") or [],
-                "confidence": reflection.get("confidence"),
-                "risk": self._text_value(item.get("risk") or "", ""),
-                "payload": {"agent_summary": item},
-            })
-        for index, item in enumerate(reflection.get("prompt_improvements") or [], 1):
-            if not isinstance(item, dict):
-                continue
-            agent_key = str(item.get("agent_key") or item.get("agentKey") or "agent")
-            audit_items.append({
-                "stage": "reflection",
-                "entity_type": "agent",
-                "entity_id": agent_key,
-                "decision": "prompt_candidate",
-                "reason": str(item.get("title") or item.get("expected_gain") or f"Prompt 改进建议 {index}"),
-                "evidence": item.get("prompt_patch") or "",
-                "confidence": reflection.get("confidence"),
-                "risk": self._text_value(item.get("risk") or "", ""),
-                "payload": {"prompt_improvement": item},
-            })
-        for index, case in enumerate(reflection.get("eval_cases") or [], 1):
-            if not isinstance(case, dict):
-                continue
-            audit_items.append({
-                "stage": "reflection",
-                "entity_type": "eval_case",
-                "entity_id": str(case.get("id") or f"eval_case:{index}"),
-                "decision": "generated",
-                "reason": self._text_value(case.get("expected_result") or case.get("description") or "复盘进化 Agent 生成的评估样例。", ""),
-                "evidence": case.get("evidence") or [],
-                "confidence": reflection.get("confidence"),
-                "payload": {"eval_case": case},
-            })
-        self._save_audit(task_id, audit_items)
-        emit("success", "复盘进化 Agent", str(reflection.get("evolution_summary") or "复盘完成。"), reflection)
-        return reflection
-
-    def _create_prompt_candidates(self, task_id: int, reflection: dict[str, Any], evaluator: HarnessEvaluator) -> None:
-        for item in reflection.get("prompt_improvements") or []:
-            agent_key = str(item.get("agent_key") or "").strip()
-            prompt_patch = str(item.get("prompt_patch") or "").strip()
-            if not agent_key or not prompt_patch or not self.storage:
-                continue
-            active = self.storage.get_active_prompt(agent_key)
-            if not active:
-                continue
-            candidate_prompt = str(active.get("prompt") or "") + "\n\n# 进化候选\n" + prompt_patch
-            candidate_id = self.storage.create_prompt_candidate(
-                agent_key=agent_key,
-                agent_name=str(active.get("agentName") or agent_key),
-                base_version=str(active.get("version") or "v1"),
-                prompt=candidate_prompt,
-                source_task_id=task_id,
-                notes=str(item.get("title") or "复盘候选改进"),
-            )
-            expected_gain = _expected_gain(item.get("expected_gain"))
-            has_safety_risk = bool(item.get("risk")) and "高" in str(item.get("risk"))
-            evaluator.consider_candidate(
-                task_id=task_id,
-                agent_key=agent_key,
-                candidate_prompt_id=candidate_id,
-                active_score=float(active.get("score") or 0.0),
-                expected_gain=expected_gain,
-                has_safety_risk=has_safety_risk,
-            )
 
     def _audit_stage(
         self,
@@ -1244,6 +1085,7 @@ class HarnessPipeline:
             payload=payload,
         )])
 
+
     def _stage_audit_item(
         self,
         *,
@@ -1268,24 +1110,6 @@ class HarnessPipeline:
             "payload": {"agent_key": agent_key, **(payload or {})},
         }
 
-    def _audit_planned_keywords(self, task_id: int | None, keywords: list[str], planning: dict[str, Any]) -> None:
-        hypotheses = planning.get("hypotheses") or []
-        by_keyword = {str(item.get("keyword") or ""): item for item in hypotheses if isinstance(item, dict)}
-        items = []
-        for keyword in keywords:
-            hypothesis = by_keyword.get(keyword) or {}
-            items.append({
-                "stage": "search",
-                "entity_type": "keyword",
-                "entity_id": keyword,
-                "source_keyword": keyword,
-                "decision": "planned",
-                "reason": hypothesis.get("intent") or planning.get("strategy_summary") or "搜索规划 Agent 生成的关键词。",
-                "evidence": hypothesis.get("expected_signals") or planning.get("evidence") or [],
-                "confidence": planning.get("confidence"),
-                "payload": {"planning": planning, "hypothesis": hypothesis},
-            })
-        self._save_audit(task_id, items)
 
     def _save_audit(self, task_id: int | None, items: list[dict[str, Any]]) -> None:
         if self.storage and task_id and items:
@@ -1303,6 +1127,7 @@ class HarnessPipeline:
                 prepared.append(normalized)
             self.storage.save_audit_decisions(task_id, prepared)
 
+
     def _default_audit_platform(self) -> str:
         platforms = [str(item) for item in (self._active_platforms or []) if str(item)]
         if len(platforms) == 1:
@@ -1311,12 +1136,17 @@ class HarnessPipeline:
             return "multi"
         return "xhs"
 
-    def _chunks(self, items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
-        return [items[index:index + size] for index in range(0, len(items), max(1, size))]
+
+    def _chunks(self, items: list[dict[str, Any]], size: int) -> Iterator[list[dict[str, Any]]]:
+        for index in range(0, len(items), max(1, size)):
+            yield items[index:index + size]
+
 
     def _note_decisions(self, items: list[dict[str, Any]], coverage_status: str) -> dict[str, dict[str, Any]]:
         decisions: dict[str, dict[str, Any]] = {}
         for item in items:
+            if not isinstance(item, dict) or item.get("decision") not in {"keep", "drop", "needs_content"}:
+                continue
             note_id = str(item.get("note_id") or item.get("id") or "").strip()
             if not note_id:
                 continue
@@ -1325,13 +1155,18 @@ class HarnessPipeline:
             decisions[note_id] = normalized
         return decisions
 
+
     def _lead_decisions(
         self,
         items: list[dict[str, Any]],
         candidates: list[dict[str, Any]],
         coverage_status: str,
     ) -> dict[str, dict[str, Any]]:
-        by_comment = {str(item.get("comment_id")): item["candidate_id"] for item in candidates if item.get("comment_id")}
+        allowed = {item["candidate_id"] for item in candidates}
+        by_pair = {(str(item.get("note_id")), str(item.get("comment_id"))): item["candidate_id"]
+                   for item in candidates if item.get("comment_id")}
+        by_comment = {str(item.get("comment_id")): item["candidate_id"] for item in candidates
+                      if item.get("comment_id") and sum(c.get("comment_id") == item.get("comment_id") for c in candidates) == 1}
         by_note_author = {
             str(item.get("note_id")): item["candidate_id"]
             for item in candidates
@@ -1339,14 +1174,16 @@ class HarnessPipeline:
         }
         decisions: dict[str, dict[str, Any]] = {}
         for item in items:
+            if not isinstance(item, dict) or item.get("decision") not in {"lead", "ignore", "below_threshold"}:
+                continue
             candidate_id = str(item.get("candidate_id") or item.get("lead_id") or "").strip()
-            if not candidate_id and item.get("comment_id"):
-                candidate_id = by_comment.get(str(item.get("comment_id")), "")
+            if candidate_id not in allowed and item.get("comment_id"):
+                candidate_id = by_pair.get((str(item.get("note_id")), str(item["comment_id"])), "") or by_comment.get(str(item["comment_id"]), "")
             if not candidate_id and str(item.get("lead_type") or "") == "note_author":
                 candidate_id = by_note_author.get(str(item.get("note_id")), "")
             if not candidate_id and not item.get("comment_id") and item.get("note_id"):
                 candidate_id = by_note_author.get(str(item.get("note_id")), "")
-            if not candidate_id:
+            if candidate_id not in allowed:
                 continue
             normalized = dict(item)
             normalized["candidate_id"] = candidate_id
@@ -1355,394 +1192,8 @@ class HarnessPipeline:
             decisions[candidate_id] = normalized
         return decisions
 
-    def _product_updates(self, items: list[dict[str, Any]], coverage_status: str) -> dict[str, dict[str, Any]]:
-        updates: dict[str, dict[str, Any]] = {}
-        for item in items:
-            lead_id = str(item.get("lead_id") or "").strip()
-            if not lead_id:
-                continue
-            normalized = dict(item)
-            normalized["coverage_status"] = coverage_status
-            updates[lead_id] = normalized
-        return updates
 
-    def _strategy_context(self, settings: dict[str, Any], planning: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "demandDescription": settings.get("demandDescription", ""),
-            "userConstraints": settings.get("userConstraints", {}),
-            "businessDirection": {
-                "value": settings.get("businessDirection", ""),
-                "label": settings.get("businessDirectionLabel", ""),
-                "description": BUSINESS_DIRECTIONS.get(settings.get("businessDirection", ""), {}).get("description", ""),
-                "keywords": BUSINESS_DIRECTIONS.get(settings.get("businessDirection", ""), {}).get("keywords", []),
-            },
-            "bridgePolicy": self._bridge_policy(settings),
-            "geoConstraints": settings.get("geoConstraints", {}),
-            "strategySummary": planning.get("strategy_summary") or planning.get("decision") or "",
-            "targetCustomerProfile": planning.get("target_customer_profile") or "",
-            "planningGeoConstraints": planning.get("geo_constraints") or {},
-            "exclusions": planning.get("exclusions") or [],
-            "hypotheses": planning.get("hypotheses") or [],
-            "availableProducts": self._product_labels(),
-        }
 
-    def _bridge_policy(self, settings: dict[str, Any]) -> dict[str, Any]:
-        direction = str(settings.get("businessDirection") or "")
-        demand = str(settings.get("demandDescription") or "")
-        if direction == "ai_training_bridge" or any(term in demand for term in ("AI培训", "AI 培训", "企业内训", "大模型培训", "智能体培训")):
-            return {
-                "mode": "ai_training_bridge",
-                "rule": "AI 培训只作为需求入口，不承诺正式培训产品；优先桥接到 AI 应用开发、智能体落地或大模型私有化部署。",
-                "keep_signals": ["企业", "公司", "内训", "报名", "怎么联系", "报价", "预算", "方案", "智能体", "落地"],
-                "downrank_signals": ["求职", "待业", "焦虑", "自学", "学习资料", "课程顾问", "培训机构", "师资"],
-            }
-        return {"mode": "none"}
-
-    def _lead_audit_item(
-        self,
-        comment: dict[str, Any],
-        decision: dict[str, Any],
-        final_decision: str,
-        fallback_reason: str,
-        lead: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        note = comment.get("note") or {}
-        score = min(max(int(decision.get("score") or 0), 0), 100)
-        if lead:
-            score = min(max(int(lead.get("score") or score), 0), 100)
-        return {
-            "platform": comment.get("platform") or (note.get("platform") if isinstance(note, dict) else "xhs"),
-            "stage": "lead_signal",
-            "entity_type": "note" if comment.get("lead_type") == "note_author" else "comment",
-            "entity_id": comment.get("candidate_id") or comment.get("comment_id") or decision.get("comment_id") or "",
-            "note_id": comment.get("note_id") or decision.get("note_id") or "",
-            "source_keyword": note.get("source_keyword", ""),
-            "decision": final_decision,
-            "reason": decision.get("reason") or fallback_reason,
-            "evidence": decision.get("evidence") or comment.get("content", ""),
-            "score": score,
-            "confidence": decision.get("confidence"),
-            "priority": decision.get("priority") or _priority_from_score(score),
-            "risk": decision.get("risk") or "",
-            "payload": {
-                "comment": {
-                    "platform": comment.get("platform") or "xhs",
-                    "candidate_id": comment.get("candidate_id"),
-                    "lead_type": comment.get("lead_type", "comment_lead"),
-                    "comment_id": comment.get("comment_id"),
-                    "note_id": comment.get("note_id"),
-                    "content": comment.get("content", ""),
-                    "ip": comment.get("ip", ""),
-                    "note": note,
-                },
-                "decision": decision,
-                "lead_type": (lead or {}).get("lead_type") or comment.get("lead_type", "comment_lead"),
-                "geo_status": (lead or {}).get("geo_status", ""),
-                "geo_reason": (lead or {}).get("geo_reason", ""),
-                "coverage_status": decision.get("coverage_status") or ("missing_after_retry" if final_decision == "missing_decision" else "initial"),
-            },
-        }
-
-    def _text_value(self, value: Any, fallback: str = "") -> str:
-        if isinstance(value, list):
-            return "；".join(str(item) for item in value if item)
-        if value in (None, ""):
-            return fallback
-        return str(value)
-
-    def _note_author_candidates(self, notes: list[dict[str, Any]], settings: dict[str, Any]) -> list[dict[str, Any]]:
-        candidates = []
-        for note in notes:
-            if not self._note_has_author_intent(note, settings):
-                continue
-            note_id = str(note.get("id") or "")
-            if not note_id:
-                continue
-            platform = str(note.get("platform") or "xhs")
-            candidate_id = f"note:{note_id}" if platform == "xhs" else f"{platform}:note:{note_id}"
-            content = "；".join(
-                item for item in [
-                    str(note.get("title") or "").strip(),
-                    str(note.get("desc") or "").strip(),
-                ] if item
-            )
-            candidates.append({
-                "platform": platform,
-                "candidate_id": candidate_id,
-                "lead_type": "note_author",
-                "comment_id": "",
-                "note_id": note_id,
-                "post_id": note.get("post_id") or note_id,
-                "nickname": note.get("author") or "",
-                "user_id": note.get("author_user_id") or "",
-                "target_user_id": note.get("author_user_id") or "",
-                "profile_url": self._profile_url(platform, note.get("author_user_id") or ""),
-                "content": content[:1200],
-                "ip": "",
-                "note": self._note_brief(note),
-            })
-        return candidates
-
-    def _note_has_author_intent(self, note: dict[str, Any], settings: dict[str, Any]) -> bool:
-        text = f"{note.get('title') or ''} {note.get('desc') or ''}".lower()
-        demand = str(settings.get("demandDescription") or "").lower()
-        commercial_terms = [
-            "预算", "报价", "费用", "多少钱", "成本", "降本", "私有化", "部署", "本地化",
-            "接入", "对接", "落地", "方案", "有人可以接", "求推荐", "想找", "采购",
-        ]
-        demand_terms = [term.lower() for term in ["客服", "ai", "大模型", "智能客服", "系统"] if term.lower() in demand]
-        has_business_intent = any(term in text for term in commercial_terms)
-        has_demand_overlap = not demand_terms or any(term in text for term in demand_terms)
-        return has_business_intent and has_demand_overlap
-
-    def _geo_constraints(self, demand_description: str, region: str = "") -> dict[str, Any]:
-        text = f"{demand_description} {region}"
-        city_to_province = {
-            "深圳": "广东",
-            "广州": "广东",
-            "东莞": "广东",
-            "佛山": "广东",
-            "上海": "上海",
-            "北京": "北京",
-            "杭州": "浙江",
-            "南京": "江苏",
-            "苏州": "江苏",
-            "成都": "四川",
-            "武汉": "湖北",
-        }
-        for city, province in city_to_province.items():
-            if city in text:
-                return {
-                    "target_city": city,
-                    "target_province": province,
-                    "strictness": "city_with_province_fallback",
-                    "fallback_policy": "same_province_keep_for_manual_confirmation",
-                }
-        if region:
-            return {"target_city": "", "target_province": region, "strictness": "province_or_region", "fallback_policy": "unknown_keep_with_risk"}
-        return {"target_city": "", "target_province": "", "strictness": "none", "fallback_policy": "keep"}
-
-    def _geo_status(self, ip: str, settings: dict[str, Any]) -> tuple[str, str]:
-        constraints = settings.get("geoConstraints") or {}
-        city = str(constraints.get("target_city") or "")
-        province = str(constraints.get("target_province") or "")
-        ip_text = str(ip or "").strip()
-        if not city and not province:
-            return "match", "本次需求没有明确地域硬约束。"
-        if not ip_text or ip_text in {"未知", "-"}:
-            return "unknown", "候选没有可用 IP 属地，需人工确认地域。"
-        if city and city in ip_text:
-            return "match", f"IP 属地包含目标城市 {city}。"
-        if province and province in ip_text:
-            if city:
-                return "needs_city_confirmation", f"IP 属地为 {province}，需人工确认是否在 {city}。"
-            return "match", f"IP 属地匹配目标地域 {province}。"
-        return "mismatch", f"IP 属地 {ip_text} 与目标地域 {city or province} 不匹配。"
-
-    def _apply_geo_gate(self, lead: dict[str, Any], settings: dict[str, Any]) -> None:
-        status, reason = self._geo_status(str(lead.get("ip") or ""), settings)
-        lead["geo_status"] = status
-        lead["geo_reason"] = reason
-        if status == "mismatch":
-            lead["score"] = min(int(lead.get("score") or 0), max(0, int(settings["minScore"]) - 1))
-            lead["priority"] = "D"
-            lead["risk"] = self._append_text(lead.get("risk"), reason)
-        elif status in {"needs_city_confirmation", "unknown"}:
-            lead["risk"] = self._append_text(lead.get("risk"), reason)
-
-    def _append_text(self, current: Any, addition: str) -> str:
-        current_text = str(current or "").strip()
-        addition = str(addition or "").strip()
-        if not addition:
-            return current_text
-        if not current_text:
-            return addition
-        if addition in current_text:
-            return current_text
-        return f"{current_text}；{addition}"
-
-    def _lead_from_decision(self, comment: dict[str, Any], decision: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
-        note = comment.get("note") or {}
-        platform = str(comment.get("platform") or note.get("platform") or "xhs")
-        user_id = str(comment.get("user_id") or "")
-        nickname = str(comment.get("nickname") or "")
-        lead_type = str(comment.get("lead_type") or decision.get("lead_type") or "comment_lead")
-        if lead_type == "note_author":
-            lead_id = str(comment.get("candidate_id") or f"note:{comment.get('note_id')}")
-        else:
-            base_lead_id = f"{comment.get('note_id')}:{comment.get('comment_id')}"
-            lead_id = base_lead_id if platform == "xhs" else f"{platform}:{base_lead_id}"
-        score = min(max(int(decision.get("score") or 0), 0), 100)
-        priority = str(decision.get("priority") or _priority_from_score(score)).upper()[:1]
-        evidence = self._text_value(decision.get("evidence"), comment.get("content", ""))
-        return {
-            "platform": platform,
-            "lead_id": lead_id,
-            "lead_type": "note_author" if lead_type == "note_author" else "comment_lead",
-            "comment_id": comment.get("comment_id"),
-            "post_id": comment.get("post_id") or comment.get("note_id"),
-            "target_user_id": user_id,
-            "profile_url": comment.get("profile_url") or self._profile_url(platform, user_id),
-            "user_id": redact_text(user_id, 4) if settings["redactUser"] else user_id,
-            "nickname": redact_text(nickname, 1) if settings["redactUser"] else nickname,
-            "raw_user_id": "" if settings["redactUser"] else user_id,
-            "raw_nickname": "" if settings["redactUser"] else nickname,
-            "content": comment.get("content", ""),
-            "evidence": evidence,
-            "ip": comment.get("ip", ""),
-            "score": score,
-            "priority": priority if priority in {"A", "B", "C", "D"} else _priority_from_score(score),
-            "stage": decision.get("stage") or "需求观察阶段",
-            "confidence": float(decision.get("confidence") or 0.0),
-            "lead_profile": self._lead_profile(decision, comment),
-            "qa_status": "pending",
-            "qa_issues": [],
-            "risk_flags": [],
-            "review_required_reason": "",
-            "matched_products": [],
-            "recommended_products": "",
-            "reason": decision.get("reason") or decision.get("decision") or "",
-            "risk": decision.get("risk") or "",
-            "demand_summary": decision.get("demand_summary") or "",
-            "note_id": comment.get("note_id"),
-            "note_title": note.get("title", ""),
-            "note_url": note.get("url", ""),
-            "geo_status": "",
-            "geo_reason": "",
-            "feedback": "待人工判断",
-            "outreach_copy": "",
-            "source_comment": comment,
-        }
-
-    def _lead_profile(self, decision: dict[str, Any], comment: dict[str, Any]) -> str:
-        raw = str(
-            decision.get("lead_profile")
-            or decision.get("leadProfile")
-            or decision.get("customer_profile")
-            or decision.get("customerProfile")
-            or decision.get("buyer_type")
-            or ""
-        ).strip().lower()
-        aliases = {
-            "enterprise": "buyer_enterprise",
-            "business": "buyer_enterprise",
-            "company": "buyer_enterprise",
-            "individual": "buyer_individual_high_intent",
-            "peer": "peer_vendor",
-            "vendor": "peer_vendor",
-            "competitor": "peer_vendor",
-            "personal": "personal_learning",
-            "learner": "personal_learning",
-        }
-        profile = aliases.get(raw, raw)
-        if profile not in {"buyer_enterprise", "buyer_individual_high_intent", "peer_vendor", "personal_learning", "unknown"}:
-            profile = "unknown"
-
-        text = " ".join([
-            str(comment.get("nickname") or ""),
-            str(comment.get("content") or ""),
-            str(decision.get("reason") or ""),
-            str(decision.get("risk") or ""),
-        ])
-        peer_terms = ("企培", "培训机构", "师资", "课程顾问", "产品顾问", "猎头", "招商", "代理")
-        personal_terms = ("待业", "找工作", "求职", "焦虑", "简历", "转行", "自学", "学习资料")
-        buyer_terms = ("报名", "怎么联系", "联系你", "多少钱", "报价", "预算", "企业", "公司", "内训", "采购", "方案")
-        if any(term in text for term in peer_terms) and not any(term in text for term in ("采购", "公司要", "企业要")):
-            return "peer_vendor"
-        if any(term in text for term in personal_terms) and not any(term in text for term in buyer_terms):
-            return "personal_learning"
-        return profile
-
-    def _lead_profile_risk(self, profile: str) -> str:
-        if profile == "peer_vendor":
-            return "疑似同行/中介账号，默认不作为直接销售线索。"
-        if profile == "personal_learning":
-            return "疑似个人学习或求职焦虑流量，缺少企业采购预算。"
-        return ""
-
-    def _apply_qa_status(self, leads: list[dict[str, Any]], qa: dict[str, Any]) -> None:
-        global_approved = bool(qa.get("approved", True))
-        for lead in leads:
-            issues = [item for item in (lead.get("qa_issues") or []) if isinstance(item, dict)]
-            levels = {str(item.get("level") or "").lower() for item in issues}
-            risk_flags = []
-            if lead.get("lead_profile") in {"peer_vendor", "personal_learning"}:
-                risk_flags.append(str(lead.get("lead_profile")))
-            if lead.get("geo_status") in {"needs_city_confirmation", "unknown", "mismatch"}:
-                risk_flags.append(str(lead.get("geo_status")))
-            if issues:
-                risk_flags.extend(sorted(level for level in levels if level))
-
-            if "error" in levels or lead.get("geo_status") == "mismatch":
-                qa_status = "rejected"
-            elif issues or risk_flags or not global_approved:
-                qa_status = "needs_review"
-            else:
-                qa_status = "approved"
-            lead["qa_status"] = qa_status
-            lead["risk_flags"] = sorted(set(risk_flags))
-            lead["review_required_reason"] = self._review_required_reason(lead, issues, global_approved)
-
-    def _review_required_reason(self, lead: dict[str, Any], issues: list[dict[str, Any]], global_approved: bool) -> str:
-        reasons = []
-        if not global_approved:
-            reasons.append("QA 未整体放行")
-        if lead.get("geo_reason"):
-            reasons.append(str(lead.get("geo_reason")))
-        if lead.get("lead_profile") in {"peer_vendor", "personal_learning"}:
-            reasons.append(self._lead_profile_risk(str(lead.get("lead_profile"))))
-        reasons.extend(str(item.get("message") or "") for item in issues if item.get("message"))
-        return "；".join(dict.fromkeys(item for item in reasons if item))
-
-    def _issue_platform(self, issue: dict[str, Any], leads: list[dict[str, Any]]) -> str:
-        target_id = str(issue.get("target_id") or "")
-        for lead in leads:
-            if target_id and target_id == str(lead.get("lead_id")):
-                return str(lead.get("platform") or "xhs")
-        return self._default_audit_platform()
-
-    def _comment_brief(self, comment: dict[str, Any], note: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
-        platform = str(comment.get("platform") or note.get("platform") or "xhs")
-        user_info = comment.get("user_info") or {}
-        content = str(comment.get("content") or "")
-        comment_id = str(comment.get("id") or abs(hash(f"{note.get('id')}:{content}")))
-        target_user_id = user_info.get("sec_user_id") or user_info.get("user_id") or ""
-        return {
-            "platform": platform,
-            "candidate_id": comment_id,
-            "lead_type": "comment_lead",
-            "comment_id": comment_id,
-            "note_id": note.get("id"),
-            "post_id": note.get("post_id") or note.get("id"),
-            "nickname": user_info.get("nickname") or user_info.get("nick_name") or "",
-            "user_id": target_user_id,
-            "target_user_id": target_user_id,
-            "profile_url": self._profile_url(platform, target_user_id),
-            "content": content,
-            "ip": comment.get("ip_location", ""),
-            "note": self._note_brief(note),
-        }
-
-    def _note_brief(self, note: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "platform": note.get("platform") or "xhs",
-            "note_id": note.get("id"),
-            "post_id": note.get("post_id") or note.get("id"),
-            "title": note.get("title"),
-            "desc": str(note.get("desc") or "")[:800],
-            "tags": note.get("tags") or [],
-            "author": note.get("author"),
-            "author_user_id": note.get("author_user_id", ""),
-            "publish_date": note.get("publish_date"),
-            "liked": note.get("liked", 0),
-            "collected": note.get("collected", 0),
-            "comments": note.get("comments", 0),
-            "shared": note.get("shared", 0),
-            "engagement": note.get("engagement", 0),
-            "url": note.get("url"),
-            "source_keyword": note.get("source_keyword", ""),
-            "scanned_comments_count": note.get("scanned_comments_count", 0),
-        }
 
     def _profile_url(self, platform: str, user_id: Any) -> str:
         target = str(user_id or "").strip()
@@ -1754,6 +1205,7 @@ class HarnessPipeline:
             return f"https://www.douyin.com/user/{target}"
         return f"https://www.xiaohongshu.com/user/profile/{target}"
 
+
     def _audit_from_trace(self, trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [
             {
@@ -1763,59 +1215,3 @@ class HarnessPipeline:
             }
             for item in trace[-100:]
         ]
-
-    def _safety(self, settings: dict[str, Any]) -> dict[str, Any]:
-        commands = {}
-        for platform in settings.get("platforms") or ["xhs"]:
-            adapter = self._adapter_for(platform)
-            commands[platform] = " ".join(getattr(adapter, "command", []))
-        return {
-            "mode": "read-only",
-            "platforms": settings.get("platforms") or ["xhs"],
-            "actions": "collection only reads search/detail/comments. Follow and Douyin DM are only allowed from the UI after per-lead user confirmation and the matching platform setting is enabled; no batch outreach.",
-            "xhsCommand": commands.get("xhs", ""),
-            "commands": commands,
-            "delayMin": settings.get("delayMin"),
-            "delayMax": settings.get("delayMax"),
-        }
-
-    def _product_labels(self) -> list[str]:
-        return [item["label"] for item in PRODUCTS]
-
-
-def _priority_from_score(score: int) -> str:
-    if score >= 80:
-        return "A"
-    if score >= 60:
-        return "B"
-    if score >= 40:
-        return "C"
-    return "D"
-
-
-def _expected_gain(value: Any) -> float:
-    if isinstance(value, (int, float)):
-        return min(max(float(value), 0.0), 0.15)
-    text = str(value or "")
-    if "高" in text:
-        return 0.06
-    if "中" in text:
-        return 0.04
-    if "低" in text:
-        return 0.02
-    return 0.03
-
-
-def _normalize_products(products: Any) -> list[dict[str, Any]]:
-    normalized: list[dict[str, Any]] = []
-    if not isinstance(products, list):
-        products = [products] if products else []
-    for index, product in enumerate(products):
-        if isinstance(product, dict):
-            tag = str(product.get("tag") or product.get("label") or f"product_{index}")
-            label = str(product.get("label") or tag)
-            normalized.append({"tag": tag, "label": label, "matched_terms": product.get("matched_terms", []), "pitch": product.get("pitch", "")})
-        elif product:
-            label = str(product)
-            normalized.append({"tag": label, "label": label, "matched_terms": [], "pitch": ""})
-    return normalized

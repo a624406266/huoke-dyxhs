@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -143,23 +144,59 @@ class XhsAdapter:
         if not ((status.get("data") or {}).get("authenticated")):
             raise RuntimeError("小红书未登录。请先执行 xhs login 或 xhs login --qrcode。")
 
-    def search(self, keyword: str, page: int = 1) -> dict[str, Any]:
-        return self.run(["search", keyword, "--sort", "popular", "--page", str(page), "--json"], timeout=90)
+    def search(self, keyword: str, page: int = 1, sort: str = "popular") -> dict[str, Any]:
+        if sort not in {"popular", "general", "latest"}:
+            raise ValueError("不支持的小红书排序方式。")
+        return self.run(["search", keyword, "--sort", sort, "--page", str(page), "--json"], timeout=90)
 
     def read_note(self, note_id: str) -> dict[str, Any]:
-        return self.run(["read", note_id, "--json"], timeout=90)
+        target = self._note_url(note_id)
+        raw = self.run(["read", target, "--json"], timeout=90)
+        return self._normalize_detail(raw, str(note_id).strip())
 
     def comments(self, note_id: str, cursor: str = "") -> dict[str, Any]:
-        args = ["comments", note_id, "--json"]
+        args = ["comments", self._note_url(note_id), "--json"]
         if cursor:
             args.extend(["--cursor", cursor])
         return self.run(args, timeout=90)
 
-    def follow_user(self, user_id: str) -> dict[str, Any]:
-        target = str(user_id or "").strip()
-        if not target:
-            raise RuntimeError("缺少可关注的小红书用户 ID。")
-        return self.run(["follow", target, "--json"], timeout=60)
+    @staticmethod
+    def _note_url(note_id: str) -> str:
+        identity = str(note_id or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", identity):
+            raise ValueError("缺少有效的小红书笔记 ID。")
+        # CLI 0.6.4 interprets a numeric bare ID as a listing index. A URL keeps
+        # it unambiguous while tokens stay in the CLI's local profile cache.
+        return f"https://www.xiaohongshu.com/explore/{identity}"
 
+    @classmethod
+    def _normalize_detail(cls, raw: dict[str, Any], expected_id: str) -> dict[str, Any]:
+        if raw.get("ok") is False:
+            return raw
+        data = raw.get("data", raw)
+        if not isinstance(data, dict):
+            raise ValueError("小红书详情返回格式不受支持。")
+        # The feed API returns items[].note_card; the CLI's HTML fallback
+        # returns the SSR note itself, with camelCase fields in some versions.
+        data = cls._snake_keys(data)
+        items = data.get("items") if isinstance(data.get("items"), list) else [data]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            card = item.get("note_card", item)
+            if not isinstance(card, dict):
+                continue
+            identities = [str(value) for value in (item.get("id"), item.get("note_id"),
+                          card.get("id"), card.get("note_id")) if value is not None and str(value)]
+            if identities and all(identity == expected_id for identity in identities):
+                return {"ok": True, "data": {"items": [{"id": expected_id, "model_type": "note", "note_card": card}]}}
+        raise ValueError("小红书详情未返回对应笔记 ID，不能将其他来源作为本条证据。")
 
-XhsCliAdapter = XhsAdapter
+    @classmethod
+    def _snake_keys(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            return [cls._snake_keys(item) for item in value]
+        if isinstance(value, dict):
+            return {re.sub(r"(?<!^)(?=[A-Z])", "_", str(key)).lower(): cls._snake_keys(item)
+                    for key, item in value.items()}
+        return value

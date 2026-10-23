@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Agent Harness 控制台</title>
+  <title>管理后台 · 关键词工作台</title>
   <style>
     :root {
       --bg: #f7f7f5;
@@ -135,15 +135,12 @@
     .list { display: grid; gap: 10px; }
     .item { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #fbfbfa; }
     .item-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 6px; }
-    .trace-output, .feedback-output, .audit-output, .prompt-output {
+    .feedback-output, .audit-output {
       max-height: 150px; overflow: auto; padding: 10px; border-radius: 8px; background: white;
       border: 1px solid var(--line); white-space: pre-wrap; font-size: 12px; color: #383838;
     }
     .feedback-output { max-height: 160px; }
     .audit-output { max-height: 190px; }
-    .prompt-output { max-height: 340px; }
-    .prompt-modal { width: min(920px, 100%); }
-    .prompt-modal .modal-body { max-height: min(72vh, 760px); overflow: auto; }
     .prompt-list { display: grid; gap: 12px; }
     .audit-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .audit-evidence { margin-top: 8px; color: #383838; }
@@ -171,19 +168,9 @@
     .btn-row button:disabled { opacity: .65; cursor: not-allowed; }
     .gate { min-height: 100vh; padding: 64px 18px 42px; display: grid; place-items: start center; }
     .gate-card { width: min(460px, 100%); padding: 22px; }
-    .gate-card label, .modal label, .section label { display: block; font-weight: 760; font-size: 13px; margin: 14px 0 8px; }
+    .gate-card label, .section label { display: block; font-weight: 760; font-size: 13px; margin: 14px 0 8px; }
     .gate-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
     .gate-actions button { box-shadow: none; }
-    .modal-mask {
-      position: fixed; inset: 0; background: rgba(15,23,42,.42); display: none; align-items: center; justify-content: center;
-      z-index: 50; padding: 18px;
-    }
-    .modal { width: min(680px, 100%); background: white; border-radius: 8px; box-shadow: 0 18px 40px rgba(15,23,42,.18); border: 1px solid var(--line); }
-    .modal-head { padding: 18px 20px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; }
-    .modal-head h2 { margin: 0; font-size: 18px; }
-    .modal-body { padding: 20px; }
-    .modal-actions { padding: 0 20px 20px; display: flex; gap: 10px; justify-content: flex-end; }
-    .modal-actions button { box-shadow: none; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .checks { display: flex; align-items: center; gap: 8px; margin-top: 12px; color: var(--muted); font-size: 13px; cursor: pointer; }
     .checks input { width: 16px; height: 16px; }
@@ -324,7 +311,7 @@
       border-radius: 8px;
       background: var(--surface-soft);
     }
-    .trace-output, .feedback-output, .audit-output, .prompt-output {
+    .feedback-output, .audit-output {
       background: #ffffff;
       border-color: #dce5e1;
     }
@@ -357,88 +344,114 @@
       .sidebar-actions .button-link, .sidebar-actions button { width: 100%; }
     }
   </style>
+  <link rel="stylesheet" href="workspace.css" />
+  <link rel="stylesheet" href="harness-workspace.css" />
 </head>
-<body>
+<body class="admin-workspace">
   <div id="adminGate" class="gate">
-    <div class="card gate-card">
-      <h2 id="adminGateTitle">管理员登录</h2>
-      <div id="adminGateIntro" class="small">请输入 Harness 管理密码后进入控制台。</div>
-      <label for="adminUsername">管理员账号</label>
-      <input id="adminUsername" value="admin" autocomplete="username" />
-      <label id="adminPasswordLabel" for="adminPassword">管理密码</label>
-      <input id="adminPassword" type="password" autocomplete="current-password" />
-      <div id="setupConfirmFields" style="display:none;">
-        <label for="adminPasswordConfirm">确认密码</label>
-        <input id="adminPasswordConfirm" type="password" autocomplete="new-password" />
+    <div class="card workspace-auth-card" aria-labelledby="adminGateTitle">
+      <div class="workspace-auth-brand"><span id="adminGateBrandIcon" class="workspace-auth-mark" aria-hidden="true">K</span><span>获客工作台<span class="small">管理后台</span></span></div>
+      <div class="workspace-auth-heading"><h2 id="adminGateTitle">管理员登录</h2><p id="adminGateIntro" class="small">输入本机管理员账号与密码，查看任务运行和质量评测。</p></div>
+      <div class="workspace-auth-form">
+        <div class="workspace-auth-field"><label for="adminUsername">管理员账号</label><input id="adminUsername" value="admin" autocomplete="username" /></div>
+        <div class="workspace-auth-field"><label id="adminPasswordLabel" for="adminPassword">管理密码</label><input id="adminPassword" type="password" autocomplete="current-password" aria-describedby="adminLoginStatus" /></div>
+        <div id="setupConfirmFields" style="display:none;"><div class="workspace-auth-field"><label for="adminPasswordConfirm">确认密码</label><input id="adminPasswordConfirm" type="password" autocomplete="new-password" aria-describedby="adminLoginStatus" /></div></div>
+        <div class="workspace-auth-actions">
+          <div id="adminLoginStatus" class="workspace-auth-status small" role="status" aria-live="polite">尚未登录。</div>
+          <button id="adminLoginBtn" class="primary" onclick="adminLogin()">进入管理后台</button>
+          <button id="adminSetupBtn" class="primary" style="display:none;" onclick="setupAdmin()">初始化管理员</button>
+        </div>
       </div>
-      <div id="adminLoginStatus" class="field-help">尚未登录。</div>
-      <div class="gate-actions">
-        <button id="adminLoginBtn" class="primary" onclick="adminLogin()">进入 Harness</button>
-        <button id="adminSetupBtn" class="primary" style="display:none;" onclick="setupAdmin()">初始化管理员</button>
-      </div>
+      <div class="workspace-auth-footer"><a href="index.html">返回工作台 <span aria-hidden="true">↗</span></a></div>
     </div>
   </div>
 
-  <main id="harnessMain" class="app-shell" style="display:none;">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="brand-mark">H</div>
-        <div>
-          <h1>Agent Harness</h1>
-          <div class="small">控制台</div>
-        </div>
-      </div>
-
-      <nav class="side-menu" aria-label="Harness 菜单">
-        <button id="nav-overview" class="menu-item active" onclick="setActivePage('overview')">总览</button>
-        <button id="nav-audit" class="menu-item" onclick="setActivePage('audit')">审计日志</button>
-        <button id="nav-trace" class="menu-item" onclick="setActivePage('trace')">Agent轨迹</button>
-        <button id="nav-agents" class="menu-item" onclick="setActivePage('agents')">Agent与Prompt</button>
-        <button id="nav-feedback" class="menu-item" onclick="setActivePage('feedback')">反馈学习</button>
-        <button id="nav-settings" class="menu-item" onclick="setActivePage('settings')">系统设置</button>
+  <main id="harnessMain" class="app-shell workspace-shell admin-workspace" style="display:none;">
+    <aside class="sidebar workspace-sidebar">
+      <a class="brand workspace-brand" href="#/runs"><span class="brand-mark">K</span><span>关键词工作台<small>管理后台</small></span></a>
+      <nav class="side-menu workspace-nav" aria-label="管理后台导航">
+        <button id="nav-overview" class="menu-item active" onclick="setActivePage('overview')"><span aria-hidden="true">◉</span>运行监控</button>
+        <button id="nav-evaluations" class="menu-item" onclick="setActivePage('evaluations')"><span aria-hidden="true">✓</span>质量评测</button>
+        <button id="nav-agents" class="menu-item" onclick="setActivePage('agents')"><span aria-hidden="true">▦</span>版本管理</button>
+        <button id="nav-feedback" class="menu-item" onclick="setActivePage('feedback')"><span aria-hidden="true">☷</span>反馈队列</button>
+        <button id="nav-settings" class="menu-item" onclick="setActivePage('settings')"><span aria-hidden="true">⚙</span>系统设置</button>
       </nav>
-
-      <div id="adminNav" class="sidebar-actions" style="display:none;">
-        <a class="button-link" href="index.html">获客工作台</a>
-        <button class="primary" onclick="refreshAll()">刷新</button>
-        <button class="secondary" onclick="adminLogout()">退出</button>
-      </div>
-
-      <div class="side-panel">
-        <h2>当前任务</h2>
-      <div id="currentTask" class="status">正在读取最新任务...</div>
-      </div>
-      <div class="side-panel">
-      <h2>历史任务</h2>
-      <div id="history" class="history"><div class="small">暂无历史任务</div></div>
+      <div id="adminNav" class="sidebar-actions admin-sidebar-footer" style="display:none;">
+        <a id="workbenchLink" class="button-link" href="index.html">↗ 返回工作台</a>
+        <button class="secondary" onclick="adminLogout()">退出登录</button>
       </div>
     </aside>
 
-    <section class="content">
-      <div class="page-header">
+    <section class="content workspace-main">
+      <div class="page-header workspace-topbar">
+        <button id="adminMenuButton" class="workspace-mobile-menu" aria-label="展开后台导航" aria-expanded="false" onclick="toggleAdminNav()">☰</button>
         <div>
-          <div id="pageTitle" class="page-title">总览</div>
-          <div id="pageSubtitle" class="sub">任务状态、关键指标和自动进化摘要。</div>
+          <h1 id="pageTitle" class="page-title">运行监控</h1>
         </div>
         <div class="btn-row" style="margin-top:0;">
-          <button onclick="refreshAll()">刷新</button>
+          <button id="adminRefreshBtn" onclick="refreshAll()">刷新数据</button>
         </div>
       </div>
 
+      <div class="admin-page-intro"><p id="pageSubtitle" class="sub">跟踪任务完成范围，检查调用轨迹与决策证据。</p><span id="adminSyncStatus" class="small" role="status">尚未同步</span></div>
+      <div id="adminTaskContext" class="admin-task-context"><div id="currentTask" class="status">正在读取任务…</div><a id="contextWorkbenchLink" class="button-link" href="index.html">在工作台查看 ↗</a></div>
+      <nav id="adminRunTabs" class="admin-tabs" aria-label="任务详情">
+        <button data-run-tab="overview" onclick="setActivePage('overview')">运行概况</button>
+        <button data-run-tab="trace" onclick="setActivePage('trace')">调用轨迹</button>
+        <button data-run-tab="audit" onclick="setActivePage('audit')">审计记录</button>
+      </nav>
       <section id="page-overview" class="page active">
+        <div class="section admin-task-list">
+          <div class="admin-section-heading"><h2>最近运行</h2><span id="adminTaskCount" class="small"></span></div>
+          <div class="admin-list-tools"><input id="adminTaskSearch" type="search" aria-label="搜索任务" placeholder="搜索任务编号、关键词或目标" oninput="renderAdminHistory()" /><select id="adminTaskFilter" aria-label="任务状态" onchange="renderAdminHistory()"><option value="">全部状态</option><option value="running">运行中</option><option value="completed">已完成</option><option value="partial">部分完成</option><option value="failed">失败</option><option value="stopped">已停止</option><option value="interrupted">已中断</option></select></div>
+          <div id="history" class="admin-history"><div class="workspace-empty">正在读取任务…</div></div>
+        </div>
         <div class="section">
-          <h2>运行总览 <span class="btn-row"><button onclick="runEval()">手动评估</button></span></h2>
+          <h2>当前运行</h2>
+          <div id="adminTaskInsights" class="task-insights-grid" aria-label="独立任务结论"></div>
           <div id="overview" class="grid">
-            <div class="metric"><b>-</b><span class="small">Agent 调用</span></div>
+            <div class="metric"><b>-</b><span class="small">智能体调用</span></div>
             <div class="metric"><b>-</b><span class="small">线索</span></div>
-            <div class="metric"><b>-</b><span class="small">Prompt 候选</span></div>
+            <div class="metric"><b>-</b><span class="small">提示词候选</span></div>
             <div class="metric"><b>-</b><span class="small">状态</span></div>
           </div>
         </div>
 
         <div class="section">
-          <h2>任务总结与进化</h2>
+          <h2>当前任务阶段覆盖</h2>
+          <div id="harnessStageCoverage" class="small">选择任务后查看完成范围和未完成原因。</div>
+        </div>
+
+        <div class="section">
+          <div class="admin-section-heading"><h2>任务总结与版本改进</h2><button id="reflectTaskBtn" onclick="reflectCurrentTask()">复盘此任务</button></div>
+          <div id="adminEvolution" class="admin-evolution" aria-live="polite"></div>
           <div id="summary" class="grid two"><div class="small">暂无任务总结</div></div>
+        </div>
+      </section>
+
+      <section id="page-evaluations" class="page">
+        <div class="section" id="evaluationPanel">
+          <h2>可复跑质量评测</h2>
+          <p class="small">候选不会自动启用。候选提示词 必须在冻结验收集上实际评测通过，再由管理员选择对应评测记录手动启用。没有标注数据时不宣称质量通过。</p>
+          <div class="admin-eval-intake"><div class="admin-field"><label for="evalFile">脱敏标注集（JSON）</label><input id="evalFile" type="file" accept=".json,application/json" /></div><div class="btn-row"><button id="importEvaluationBtn" onclick="importEvaluationDataset()">导入样本集</button><button id="refreshEvaluationBtn" onclick="loadEvaluationData()">刷新记录</button></div></div>
+          <details><summary>JSON 格式与验收门槛</summary><pre style="white-space:pre-wrap;">{ "name": "关键词验收集 v1", "samples": [
+  { "id": "sample-1", "noteId": "同帖分组编号", "topic": "主题", "sourceUrl": "https://…", "collectedAt": "ISO时间", "text": "脱敏原文", "split": "acceptance", "labels": { "relevant": true, "classification": "demand" }, "annotator": "标注人", "sourceVerified": true, "keywords": ["词"], "searchGoal": "目标" }
+] }</pre><p class="small">classification 为 demand / uncertain / information / promotion / irrelevant；split 为 development / acceptance。不得把同一笔记拆到调试集与验收集。计划目标：100 条真实样本（40 条调试、60 条验收），至少三个主题；相关性精确率 ≥85%、召回率 ≥80%，明确需求精确率 ≥80%、召回率 ≥70%，引用核验全部通过。以实际后端评测门槛为准。</p><p class="small">质检 / 报告专用样本还需 agentKey（critic_qa_agent / report_agent）、offeringId、冻结 input 和人工 expected。质检的 expected 为 approved、issueTargets；报告为 requiredFacts、forbiddenClaims。每条需独立人工质量结论与备注，不能借用需求分类的通过记录。</p></details>
+          <div class="admin-eval-setup"><h3>新建评测</h3><div class="admin-form-grid"><div class="admin-field"><label for="evalDataset">样本集</label><select id="evalDataset"><option value="">请导入或刷新</option></select></div><div class="admin-field"><label for="evalSplit">数据划分</label><select id="evalSplit"><option value="acceptance">冻结验收集</option><option value="development">调试集</option></select></div><div class="admin-field"><label for="evalAgentKey">当前版本的评测环节</label><select id="evalAgentKey"><option value="lead_signal_agent">相关性与需求分类</option><option value="critic_qa_agent">证据质检</option><option value="report_agent">报告生成</option></select></div><div class="admin-field admin-field-wide"><label for="evalPrompt">评测版本</label><select id="evalPrompt"><option value="">当前启用版本</option></select></div></div><div class="admin-action-row"><button id="runEvaluationBtn" class="primary" onclick="runEval()">执行真实样本评测</button><span class="small">选择具体版本时以该版本的处理环节为准；实际调用模型，完成后仍须人工核验。</span></div></div>
+          <div id="evalStatus" class="admin-inline-status" role="status"></div>
+          <div class="admin-field admin-eval-record-picker"><label for="evalRunSelect">查看已有评测记录</label><select id="evalRunSelect" onchange="selectEvaluationRun()"><option value="">选择记录查看逐条输出</option></select></div>
+          <div id="evalResultSummary" class="admin-eval-summary"></div>
+          <div id="evalComparison" class="admin-eval-comparison"><div class="workspace-empty">选择评测记录后，对照原文核验每条输出。</div></div>
+          <details class="admin-raw"><summary>完整评测数据</summary><pre id="evalOutput"></pre></details>
+          <fieldset id="evalReviewPanel" class="admin-human-review" disabled>
+            <legend>人工质量核验</legend><p class="small">自动指标无法穷尽事实错误。请逐条阅读当前评测输出，对照原文检查引用、身份、预算、联系方式和承诺；全部核验后再勾选。自动指标与人工核验均通过才可启用候选。</p>
+            <label class="checks"><input id="evalReviewedAll" type="checkbox" />我已逐条核对当前评测的全部输出</label>
+            <label class="checks"><input id="evalNoFabrication" type="checkbox" />未发现无依据的身份、预算、联系方式或承诺</label>
+            <label class="checks"><input id="evalCitationsVerified" type="checkbox" />引用与来源原文一致且可追溯</label>
+            <label for="evalHumanNote">人工核验说明（必填）</label><textarea id="evalHumanNote" placeholder="说明核对依据、发现与处理结果"></textarea>
+            <div class="admin-action-row"><button id="reviewEvaluationBtn" class="primary" onclick="confirmEvaluationReview()">保存人工核验</button><span class="small">逐条核对全部样本，勾选声明并填写说明后保存。</span></div>
+          </fieldset>
+
         </div>
       </section>
 
@@ -454,7 +467,7 @@
           </h2>
           <div class="filter-grid">
             <div>
-              <label for="auditTaskId">任务 ID</label>
+              <label for="auditTaskId">任务编号</label>
               <input id="auditTaskId" inputmode="numeric" placeholder="全部" />
             </div>
             <div>
@@ -464,7 +477,7 @@
                 <option value="search">搜索采集</option>
                 <option value="relevance">相关性判断</option>
                 <option value="lead_signal">线索识别</option>
-                <option value="product_strategy">产品策略</option>
+                <option value="intent_analysis">需求研判</option>
                 <option value="orchestrate">任务编排</option>
                 <option value="plan">搜索规划</option>
                 <option value="read_detail">详情读取</option>
@@ -484,7 +497,7 @@
                 <option value="comment">评论</option>
                 <option value="lead">线索</option>
                 <option value="task">任务</option>
-                <option value="agent">Agent</option>
+                <option value="agent">智能体</option>
               </select>
             </div>
             <div>
@@ -512,7 +525,7 @@
                 <option value="recommended_action">推荐动作</option>
                 <option value="risk_warning">风险提示</option>
                 <option value="review">复盘评估</option>
-                <option value="prompt_candidate">Prompt 候选</option>
+                <option value="prompt_candidate">提示词候选</option>
                 <option value="follow_requested">关注已请求</option>
                 <option value="follow_success">关注成功</option>
                 <option value="follow_failed">关注失败</option>
@@ -565,7 +578,7 @@
 
       <section id="page-trace" class="page">
         <div class="section">
-          <h2>Agent 执行轨迹</h2>
+          <h2>智能体执行轨迹</h2>
           <div id="trace" class="list"><div class="small">暂无执行轨迹</div></div>
         </div>
 
@@ -577,115 +590,71 @@
 
       <section id="page-agents" class="page">
         <div class="section">
-          <h2>Agent 拓扑</h2>
-          <div id="agents" class="grid two"><div class="small">正在读取 Agent 列表...</div></div>
+          <h2>处理环节</h2>
+          <div id="agents" class="grid two"><div class="small">正在读取智能体列表...</div></div>
         </div>
 
         <div class="section">
-          <h2>提示词 / Skill 版本</h2>
+          <h2>提示词版本</h2><p class="small">打开候选详情查看版本差异、关联验收记录并手动启用。</p>
           <div id="prompts" class="list"><div class="small">正在读取提示词版本...</div></div>
         </div>
       </section>
 
       <section id="page-feedback" class="page">
         <div class="section">
-          <h2>反馈学习队列</h2>
+          <h2>反馈队列</h2><div class="admin-list-tools"><select id="adminFeedbackFilter" aria-label="反馈状态" onchange="renderFeedback(latestFeedback)"><option value="">全部反馈</option><option value="pending">待分析</option><option value="analyzed">待创建候选</option><option value="applied">已创建候选</option><option value="dismissed">已忽略</option></select><span class="small">人工反馈经分析后创建候选；验收通过后才能启用。</span></div>
+          <div id="feedbackSyncStatus" class="admin-inline-status admin-feedback-sync" data-tone="error" role="status" hidden><span id="feedbackSyncMessage"></span><button onclick="refreshAll()">刷新重试</button></div>
           <div id="feedbackQueue" class="list"><div class="small">正在读取反馈队列...</div></div>
         </div>
       </section>
 
       <section id="page-settings" class="page">
-        <div class="section">
-          <h2>系统设置 <span class="btn-row" style="margin-top:0;"><button id="saveSettingsBtn" class="primary" onclick="saveSettings()">保存</button></span></h2>
-          <label for="settingApiBase">API 中转站地址</label>
-          <input id="settingApiBase" placeholder="例如：https://poolrouter.com/v1" />
-          <div class="field-help">OpenAI 兼容接口 base URL，通常以 /v1 结尾。</div>
-
-          <div class="row">
-            <div>
-              <label for="settingModel">模型名称</label>
-              <input id="settingModel" placeholder="例如：gemini-3.5-flash" />
+        <div class="section admin-settings-section">
+          <div class="admin-settings-header"><h2>系统设置</h2><div class="btn-row"><span id="settingsDirtyStatus" class="small" role="status">所有更改已保存</span><button id="discardSettingsBtn" onclick="discardAdminSettings()" disabled>放弃更改</button><button id="saveSettingsBtn" class="primary" onclick="saveSettings()">保存设置</button></div></div>
+          <p class="small admin-settings-description">三组配置统一保存。任务运行期间暂时锁定，未保存输入会保留。</p>
+          <div id="settingsNotice" class="admin-inline-status" role="status"></div>
+          <fieldset id="settingsModelGroup" class="admin-settings-group"><legend>01 · 模型连接</legend>
+            <div class="admin-form-grid">
+              <div class="admin-field admin-field-wide"><label for="settingApiBase">模型接口地址</label><input id="settingApiBase" placeholder="例如：https://api.example.com/v1" /><div class="field-help">OpenAI 兼容接口的基础地址，通常以 /v1 结尾。</div></div>
+              <div class="admin-field"><label for="settingModel">模型名称</label><input id="settingModel" placeholder="填写服务提供的模型名称" /></div>
+              <div class="admin-field"><label for="settingTemperature">采样温度</label><input id="settingTemperature" type="number" min="0" max="2" step="0.1" value="0.6" /></div>
+              <div class="admin-field"><label for="settingConnectTimeout">模型连接超时（秒）</label><input id="settingConnectTimeout" type="number" min="1" max="86400" step="1" value="30" required /><div class="field-help">等待建立模型服务连接的时限，默认 30 秒。</div></div>
+              <div class="admin-field"><label for="settingReadTimeout">首响应与流空闲超时（秒）</label><input id="settingReadTimeout" type="number" min="1" max="86400" step="1" value="60" required /><div class="field-help">等待首段响应或相邻数据的最长间隔，默认 60 秒；不是总生成时间。</div></div>
+              <div class="admin-field admin-field-wide"><label for="settingTotalTimeout">本次分析总时限（秒）</label><input id="settingTotalTimeout" type="number" min="1" max="86400" step="1" value="300" required /><div class="field-help">默认 300 秒。一次结构化模型调用的全部至多 3 次尝试、格式修复和重试等待共用此时限，不在重试时重置；不是整个采集任务的总时限。三项均支持 1–86400 的整数秒。</div></div>
+              <div class="admin-field admin-field-wide"><label for="settingApiKey">模型访问密钥</label><input id="settingApiKey" type="password" placeholder="留空则保留当前密钥" autocomplete="off" /><div id="apiKeyHelp" class="field-help">已保存的密钥不会回显。输入新密钥 后会覆盖当前配置。</div></div>
             </div>
-            <div>
-              <label for="settingTemperature">Temperature</label>
-              <input id="settingTemperature" type="number" min="0" max="2" step="0.1" value="0.6" />
+          </fieldset>
+          <fieldset id="settingsPlatformGroup" class="admin-settings-group"><legend>02 · 平台连接</legend>
+            <div class="admin-form-grid">
+              <div class="admin-field admin-field-wide"><label for="settingXhsBin">小红书工具路径</label><input id="settingXhsBin" placeholder="本机可填 xhs 或 虚拟环境中的 xhs 绝对路径" /></div>
+              <div class="admin-field admin-field-wide"><span class="admin-field-label" id="defaultPlatformsLabel">默认采集平台</span><div class="admin-choice-row" role="group" aria-labelledby="defaultPlatformsLabel"><label class="checks"><input id="settingPlatformXhs" type="checkbox" />小红书</label><label class="checks"><input id="settingPlatformDouyin" type="checkbox" />抖音</label></div></div>
+              <div class="admin-field admin-field-wide"><label for="settingOpencliBin">OpenCLI 路径</label><input id="settingOpencliBin" placeholder="可留空使用 PATH 中的 opencli" /></div>
+              <div class="admin-field admin-field-wide"><label for="settingSocialDataxEnv">SocialDataX 环境变量名</label><input id="settingSocialDataxEnv" placeholder="SOCIALDATAX_API_KEY，不要粘贴真实密钥" /><div id="socialDataxHelp" class="field-help">这里只填变量名，例如 SOCIALDATAX_API_KEY；真实密钥放到系统环境变量里。</div></div>
             </div>
-          </div>
-
-          <label for="settingApiKey">API Key</label>
-          <input id="settingApiKey" type="password" placeholder="留空则保留当前密钥" autocomplete="off" />
-          <div id="apiKeyHelp" class="field-help">已保存的密钥不会回显。输入新 Key 后会覆盖当前配置。</div>
-
-          <label for="settingXhsBin">XHS 路径</label>
-          <input id="settingXhsBin" placeholder="本机可填 xhs 或 venv 中的 xhs 绝对路径" />
-
-          <label>默认采集平台</label>
-          <div class="row">
-            <label class="checks"><input id="settingPlatformXhs" type="checkbox" />小红书</label>
-            <label class="checks"><input id="settingPlatformDouyin" type="checkbox" />抖音</label>
-          </div>
-
-          <label for="settingBusinessDirection">默认产品/服务匹配范围</label>
-          <select id="settingBusinessDirection">
-            <option value="cloud_ai">开放需求获客（默认）</option>
-          </select>
-          <div id="settingBusinessDirectionHelp" class="field-help">新任务未显式选择时使用该默认范围；它影响 Agent 匹配倾向，不是唯一硬过滤。</div>
-
-          <label for="settingOpencliBin">OpenCLI 路径</label>
-          <input id="settingOpencliBin" placeholder="可留空使用 PATH 中的 opencli" />
-
-          <label for="settingSocialDataxEnv">SocialDataX 环境变量名</label>
-          <input id="settingSocialDataxEnv" placeholder="SOCIALDATAX_API_KEY，不要粘贴真实 Key" />
-          <div id="socialDataxHelp" class="field-help">这里只填变量名，例如 SOCIALDATAX_API_KEY；真实 Key 放到系统环境变量里。</div>
-
-          <label class="checks"><input id="settingRedactUser" type="checkbox" />工作台展示时打码公开昵称和用户 ID</label>
-
-          <label>默认采集延迟（秒）</label>
-          <div class="row">
-            <input id="settingDelayMin" type="number" min="0" max="120" value="7" />
-            <input id="settingDelayMax" type="number" min="0" max="120" value="60" />
-          </div>
-          <label for="settingMaxComments">每篇最多扫描评论数</label>
-          <input id="settingMaxComments" type="number" min="1" max="500" value="50" />
-          <div class="field-help">默认 50。数值越高召回越多，但任务会更慢，也更容易遇到验证码或风控。</div>
-
-          <label class="checks"><input id="settingEnableFollowActions" type="checkbox" />允许手动关注线索对象</label>
-          <div class="field-help">默认关闭。开启后，小红书线索会显示“关注”按钮；仍需用户逐条二次确认。</div>
-
-          <label for="settingDouyinMaxComments">每个抖音作品最多扫描评论数</label>
-          <input id="settingDouyinMaxComments" type="number" min="1" max="500" value="50" />
-
-          <label class="checks"><input id="settingDouyinFollowActions" type="checkbox" />允许手动关注抖音线索对象</label>
-          <label class="checks"><input id="settingDouyinDmActions" type="checkbox" />允许逐条发送抖音私信</label>
-          <div class="field-help">默认关闭。开启后仍需销售页逐条二次确认，不支持批量关注或批量私信。</div>
+          </fieldset>
+          <fieldset id="settingsSafetyGroup" class="admin-settings-group"><legend>03 · 安全与隐私</legend>
+            <div class="admin-settings-choices">
+              <div class="admin-setting-choice"><label class="checks"><input id="settingRedactUser" type="checkbox" />工作台展示时打码公开昵称和用户编号</label></div>
+              <div class="admin-setting-choice"><label class="checks"><input id="settingEnableFollowActions" type="checkbox" />允许手动关注小红书线索对象</label><p class="field-help">可主动暂停关注能力。开启后仍需逐条核对账号与目标并确认。</p></div>
+              <div class="admin-setting-choice"><label class="checks"><input id="settingDouyinFollowActions" type="checkbox" />允许手动关注抖音线索对象</label></div>
+              <div class="admin-setting-choice"><label class="checks"><input id="settingDouyinDmActions" type="checkbox" />允许逐条发送抖音私信</label><p class="field-help">默认关闭。开启后仍需工作台逐条二次确认，不支持批量关注或批量私信。</p></div>
+            </div>
+          </fieldset>
         </div>
       </section>
     </section>
   </main>
+  <button id="adminNavBackdrop" class="admin-nav-backdrop" aria-label="关闭后台导航" onclick="toggleAdminNav(false)" tabindex="-1"></button>
 
-  <div id="promptModalMask" class="modal-mask" onclick="closeAgentPromptModal()">
-    <div class="modal prompt-modal" role="dialog" aria-modal="true" aria-labelledby="promptModalTitle" onclick="event.stopPropagation()">
-      <div class="modal-head">
-        <h2 id="promptModalTitle">Agent 提示词</h2>
-        <button onclick="closeAgentPromptModal()">关闭</button>
-      </div>
-      <div id="promptModalBody" class="modal-body">
-        <div class="small">正在读取提示词...</div>
-      </div>
-      <div class="modal-actions">
-        <button onclick="closeAgentPromptModal()">关闭</button>
-      </div>
-    </div>
-  </div>
-
+  <dialog id="candidateDialog" class="admin-candidate-dialog" aria-labelledby="candidateTitle"><div class="admin-dialog-heading"><div><h2 id="candidateTitle">版本详情</h2></div><button onclick="closeCandidateDetail()" aria-label="关闭版本详情">关闭</button></div><div id="candidateBody"></div></dialog>
+  <dialog id="agentCallDialog" class="admin-candidate-dialog" aria-labelledby="agentCallTitle"><div class="admin-dialog-heading"><h2 id="agentCallTitle">完整调用记录</h2><button onclick="closeAgentCall()" aria-label="关闭完整调用记录">关闭</button></div><div id="agentCallBody" class="admin-full-call"></div></dialog>
+  <script src="workspace-data.js"></script>
+  <script src="display-text.js"></script>
+  <script src="workspace-ui.js"></script>
   <script>
     const $ = (id) => document.getElementById(id);
     function displayText(value) {
-      return String(value ?? '')
-        .replaceAll('微闻云', '当前工作台')
-        .replaceAll('内部销售', '使用者')
-        .replaceAll('销售团队', '团队')
-        .replaceAll('销售人员', '使用者');
+      return String(value ?? '');
     }
     const esc = (s) => displayText(s).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
     const fmt = (n) => Number(n || 0).toLocaleString('zh-CN');
@@ -693,27 +662,21 @@
     let latestTask = null;
     let latestPrompts = [];
     let latestFeedback = [];
+    let feedbackLoaded = false;
+    let feedbackLoadError = false;
     let adminReady = false;
     let activePage = localStorage.getItem('harnessActivePage') || 'overview';
-    if (activePage === 'sales') activePage = 'overview';
     let adminSetupMode = false;
     let settingsLoaded = false;
-    let settingsConfig = {};
+    function adminNotice(message, tone = "info") {
+      message = DisplayText.message(message);
+      if (activePage === 'settings' && tone !== 'success') { $('settingsNotice').textContent = message; $('settingsNotice').dataset.tone = 'error'; }
+      if (window.WorkspaceUI) { window.WorkspaceUI.notify(String(message), tone); return; }
+      alert(String(message));
+    }
     const auditState = { offset: 0, limit: 100, total: 0, hasMore: false, loaded: false, loading: false };
     const busyFeedback = new Set();
-    function wireButtonFeedback() {
-      document.addEventListener('pointerdown', event => {
-        const button = event.target.closest('button');
-        if (!button || button.disabled) return;
-        button.classList.add('is-pressing');
-      });
-      ['pointerup', 'pointercancel', 'pointerleave'].forEach(type => {
-        document.addEventListener(type, event => {
-          const button = event.target.closest('button');
-          if (button) button.classList.remove('is-pressing');
-        });
-      });
-    }
+
     async function withButtonBusy(buttonId, busyText, action) {
       const button = $(buttonId);
       if (!button) return action();
@@ -727,89 +690,7 @@
         button.textContent = oldText;
       }
     }
-    const PAGE_COPY = {
-      overview: ['总览', '任务状态、关键指标和自动进化摘要。'],
-      audit: ['审计日志', '按任务、阶段、实体、决策和关键词检索 Harness 审计记录。'],
-      trace: ['Agent轨迹', '查看当前任务的 Agent 调用链路和事件流。'],
-      agents: ['Agent与Prompt', '管理 Agent 拓扑、提示词候选和当前版本。'],
-      feedback: ['反馈学习', '分析人工反馈并应用到运行时 Prompt/Skill。'],
-      settings: ['系统设置', '配置模型、中转站、XHS 路径和工作台展示策略。']
-    };
 
-    function businessDirectionOptions(selected) {
-      const options = settingsConfig.businessDirections || [];
-      const current = selected || settingsConfig.sales?.default_business_direction || settingsConfig.defaultBusinessDirection || 'cloud_ai';
-      return options.map(item => `<option value="${esc(item.value)}" ${item.value === current ? 'selected' : ''}>${esc(item.label)}</option>`).join('');
-    }
-
-    function updateSettingBusinessDirectionHelp() {
-      const current = $('settingBusinessDirection')?.value || 'cloud_ai';
-      const item = (settingsConfig.businessDirections || []).find(option => option.value === current);
-      const keywords = (item?.keywords || []).slice(0, 5).join(' / ');
-      const text = [item?.description || '新任务未显式选择时使用该默认范围；它影响 Agent 匹配倾向，不是唯一硬过滤。', keywords ? `参考词：${keywords}` : ''].filter(Boolean).join(' ');
-      if ($('settingBusinessDirectionHelp')) $('settingBusinessDirectionHelp').textContent = text;
-    }
-    const AGENT_DISPLAY_NAMES = {
-      chief_orchestrator: '总控编排 Agent',
-      planning_agent: '搜索规划 Agent',
-      relevance_agent: '相关性判断 Agent',
-      lead_signal_agent: '线索识别 Agent',
-      product_strategy_agent: '产品策略 Agent',
-      critic_qa_agent: '质检风控 Agent',
-      report_agent: '报告 Agent',
-      reflection_evolution_agent: '复盘进化 Agent',
-      feedback_learning_agent: '反馈学习 Agent',
-      'Chief Orchestrator': '总控编排 Agent',
-      'Planning Agent': '搜索规划 Agent',
-      'Relevance Agent': '相关性判断 Agent',
-      'Lead Signal Agent': '线索识别 Agent',
-      'Product Strategy Agent': '产品策略 Agent',
-      'Critic / QA Agent': '质检风控 Agent',
-      'Report Agent': '报告 Agent',
-      'Reflection / Evolution Agent': '复盘进化 Agent',
-      'Auth Agent': '登录检查',
-      'Tool Harness': '工具 Harness',
-      'Delay Guard': '延迟保护',
-      'Task Manager': '任务管理器',
-      'Keyword Agent': '关键词规划 Agent',
-      'Search Agent': '搜索读取 Agent',
-      'Signal Agent': '线索信号 Agent',
-      'Product Match Agent': '产品匹配 Agent',
-      'QA Agent': '质检汇总 Agent',
-    };
-    const PURPOSE_DISPLAY_NAMES = {
-      'task orchestration': '任务理解与阶段编排',
-      'search planning': '搜索策略规划',
-      'batch note relevance': '批量笔记相关性判断',
-      'adaptive relevance review': '自适应相关性复审',
-      'batch lead signal detection': '批量线索信号识别',
-      'adaptive lead review': '自适应线索复审',
-      'product match and outreach copy': '产品匹配与人工跟进话术',
-      'quality and safety review': '质量与安全边界检查',
-      'sales report generation': '获客报告生成',
-      'task reflection and evolution': '任务复盘与进化候选生成',
-      'feedback learning analysis': '人工反馈学习分析',
-      'missing relevance decisions': '相关性缺失判断补齐',
-      'missing lead decisions': '线索缺失判断补齐',
-      'missing product updates': '产品策略缺失补齐',
-    };
-    const STAGE_DISPLAY_NAMES = {
-      search: '搜索采集',
-      relevance: '相关性判断',
-      lead_signal: '线索识别',
-      product_strategy: '产品策略',
-      orchestrate: '任务编排',
-      plan: '搜索规划',
-      read_detail: '详情读取',
-      comments: '评论扫描',
-      qa: '质检风控',
-      report: '报告生成',
-      reflection: '复盘进化',
-      outreach: '触达动作',
-      done: '已完成',
-      starting: '启动中',
-      round: '扫描轮次',
-    };
     const DECISION_DISPLAY_NAMES = {
       planned: '已规划',
       collected: '已采集',
@@ -831,7 +712,7 @@
       recommended_action: '推荐动作',
       risk_warning: '风险提示',
       review: '复盘评估',
-      prompt_candidate: 'Prompt 候选',
+      prompt_candidate: '提示词候选',
       follow_requested: '关注已请求',
       follow_success: '关注成功',
       follow_failed: '关注失败',
@@ -855,7 +736,7 @@
       comment: '评论',
       lead: '线索',
       task: '任务',
-      agent: 'Agent',
+      agent: '智能体',
       eval_case: '评估样例',
     };
     const COVERAGE_STATUS_DISPLAY_NAMES = {
@@ -878,7 +759,9 @@
       valid_lead: '有效线索',
       invalid_lead: '误判线索',
       missed_lead: '漏识别线索',
-      wrong_product: '产品匹配不准',
+      irrelevant: '相关性错误',
+      wrong_evidence: '证据错误',
+      wrong_classification: '需求分类错误',
       bad_outreach: '跟进话术不合适',
       other: '其他'
     };
@@ -887,43 +770,11 @@
       return location.protocol === 'file:' ? 'http://127.0.0.1:8765' : '';
     }
 
-    function setActivePage(page) {
-      if (!PAGE_COPY[page]) page = 'overview';
-      activePage = page;
-      localStorage.setItem('harnessActivePage', page);
-      Object.keys(PAGE_COPY).forEach(key => {
-        const nav = $(`nav-${key}`);
-        const panel = $(`page-${key}`);
-        if (nav) nav.classList.toggle('active', key === page);
-        if (panel) panel.classList.toggle('active', key === page);
-      });
-      $('pageTitle').textContent = PAGE_COPY[page][0];
-      $('pageSubtitle').textContent = PAGE_COPY[page][1];
-      if (page === 'settings') loadSettings();
-      if (page === 'audit' && !auditState.loaded) loadAuditLogs(true);
-    }
-
-    function showAdminGate(message = '请先登录。') {
-      adminReady = false;
-      adminSetupMode = false;
-      $('adminGateTitle').textContent = '管理员登录';
-      $('adminGateIntro').textContent = '请输入 Harness 管理密码后进入控制台。';
-      $('adminPasswordLabel').textContent = '管理密码';
-      $('setupConfirmFields').style.display = 'none';
-      $('adminLoginBtn').style.display = 'inline-flex';
-      $('adminSetupBtn').style.display = 'none';
-      $('adminGate').style.display = 'grid';
-      $('harnessMain').style.display = 'none';
-      $('adminNav').style.display = 'none';
-      $('adminLoginStatus').textContent = message;
-      $('adminLoginStatus').style.color = 'var(--muted)';
-    }
-
-    function showSetupGate(message = '首次本地启动，请先设置 Harness 管理员密码。') {
+    function showSetupGate(message = '首次使用，请设置本机管理员密码。') {
       adminReady = false;
       adminSetupMode = true;
       $('adminGateTitle').textContent = '初始化管理员';
-      $('adminGateIntro').textContent = '本地 SQLite 中还没有管理员。设置后即可进入 Harness。';
+      $('adminGateIntro').textContent = '本机尚未创建管理员。设置后即可进入管理后台。';
       $('adminPasswordLabel').textContent = '新管理密码';
       $('setupConfirmFields').style.display = 'block';
       $('adminLoginBtn').style.display = 'none';
@@ -933,15 +784,6 @@
       $('adminNav').style.display = 'none';
       $('adminLoginStatus').textContent = message;
       $('adminLoginStatus').style.color = 'var(--muted)';
-    }
-
-    function showHarness() {
-      adminReady = true;
-      adminSetupMode = false;
-      $('adminGate').style.display = 'none';
-      $('harnessMain').style.display = 'grid';
-      $('adminNav').style.display = 'inline-flex';
-      setActivePage(activePage);
     }
 
     async function adminMe() {
@@ -972,7 +814,7 @@
           showHarness();
           await refreshAll();
         } catch (err) {
-          $('adminLoginStatus').textContent = '登录失败：' + (err.message || err);
+          $('adminLoginStatus').textContent = '登录失败：' + DisplayText.message(err.message || err);
           $('adminLoginStatus').style.color = 'var(--red)';
         }
       });
@@ -1007,17 +849,10 @@
           showHarness();
           await refreshAll();
         } catch (err) {
-          $('adminLoginStatus').textContent = '初始化失败：' + (err.message || err);
+          $('adminLoginStatus').textContent = '初始化失败：' + DisplayText.message(err.message || err);
           $('adminLoginStatus').style.color = 'var(--red)';
         }
       });
-    }
-
-    async function adminLogout() {
-      try {
-        await fetch(`${apiBase()}/api/auth/logout`, { method: 'POST', credentials: 'same-origin' });
-      } catch {}
-      showAdminGate('已退出 Harness。');
     }
 
     async function bootAdmin() {
@@ -1031,7 +866,7 @@
         showHarness();
         await refreshAll();
       } catch {
-        showAdminGate('请先登录 Harness。');
+        showAdminGate('请先登录管理后台。');
       }
     }
 
@@ -1056,37 +891,37 @@
     }
 
     function statusLabel(status) {
-      return { running:'运行中', completed:'已完成', failed:'失败', stopped:'已停止', interrupted:'已中断' }[status] || status || '未知';
+      return DisplayText.status(status);
     }
 
     function promptStatusLabel(status) {
-      return { active:'当前版本', candidate:'候选版本', disabled:'已禁用' }[status] || status || '未知';
+      return { active:'当前版本', candidate:'候选版本', disabled:'已禁用' }[status] || DisplayText.status(status);
     }
 
-    function feedbackStatusLabel(status) {
-      return { pending:'待分析', analyzed:'已分析', applied:'已应用', dismissed:'已忽略' }[status] || status || '未知';
+    function promptNotesLabel(value) {
+      return value === 'Built-in Harness prompt.' ? '系统内置提示词' : value;
     }
 
     function mappedLabel(map, value, fallback = '-') {
       if (value === undefined || value === null || value === '') return fallback;
       const text = String(value);
-      return map[text] || map[text.toLowerCase()] || text;
+      return map[text] || map[text.toLowerCase()] || DisplayText.code(text, fallback || '未记录');
     }
 
     function agentLabel(value) {
-      return mappedLabel(AGENT_DISPLAY_NAMES, value, 'Agent');
+      return DisplayText.agent(value);
     }
 
     function platformLabel(platform) {
-      return { xhs: '小红书', douyin: '抖音', multi: '多平台' }[platform] || platform || '未知平台';
+      return DisplayText.platform(platform);
     }
 
     function purposeLabel(value) {
-      return mappedLabel(PURPOSE_DISPLAY_NAMES, value, '');
+      return DisplayText.purpose(value);
     }
 
     function stageLabel(value) {
-      return mappedLabel(STAGE_DISPLAY_NAMES, value);
+      return DisplayText.stage(value);
     }
 
     function decisionLabel(value) {
@@ -1162,69 +997,15 @@
         : '';
     }
 
-    async function post(path, body = {}) {
-      const res = await fetch(`${apiBase()}${path}`, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      if (res.status === 401 || res.status === 403) {
-        showAdminGate('管理员会话已过期，请重新登录。');
-        throw new Error('管理员会话已过期');
-      }
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.error || '请求失败');
-      return json.data;
+    function post(path, body = {}) {
+      return requestAdmin(path, { method: 'POST', body });
     }
 
-    async function get(path) {
-      const res = await fetch(`${apiBase()}${path}`, { credentials: 'same-origin' });
-      if (res.status === 401 || res.status === 403) {
-        showAdminGate('管理员会话已过期，请重新登录。');
-        throw new Error('管理员会话已过期');
-      }
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.error || '请求失败');
-      return json.data;
+    function get(path) {
+      return requestAdmin(path);
     }
-
-    async function refreshAll() {
-      await Promise.allSettled([loadAgents(), loadPrompts(), loadFeedback(), loadHistory()]);
-      await loadTask(currentTaskId);
-      if (activePage === 'audit' && (auditState.loaded || currentTaskId)) await loadAuditLogs(false);
-      if (activePage === 'settings') await loadSettings(true);
-    }
-
-    async function loadHistory() {
-      const data = await post('/api/admin/tasks/list', { limit: 20 });
-      const tasks = data.tasks || [];
-      if (!currentTaskId && tasks[0]) currentTaskId = String(tasks[0].id);
-      $('history').innerHTML = tasks.length ? tasks.map(t => `
-        <button onclick="selectTask(${Number(t.id)})">
-          <span>#${fmt(t.id)} · ${esc(statusLabel(t.status))}<br><span class="small">${esc(t.keyword || '无关键词')} · 笔记 ${fmt(t.notesCount)} · 线索 ${fmt(t.leadsCount)} · ${formatTime(t.updatedAt)}</span></span>
-        </button>
-      `).join('') : '<div class="small">暂无历史任务</div>';
-    }
-
-    async function selectTask(taskId) {
-      currentTaskId = String(taskId);
-      localStorage.setItem('currentTaskId', currentTaskId);
-      await loadTask(currentTaskId);
-    }
-
-    async function loadTask(taskId) {
-      if (!taskId) {
-        $('currentTask').textContent = '暂无任务。请先在获客工作台启动一次扫描。';
-        return;
-      }
-      const data = await post('/api/admin/tasks/status', { taskId });
-      if (!data || data.hasTask === false) {
-        $('currentTask').textContent = '没有找到该任务。';
-        return;
-      }
-      latestTask = data;
-      renderTask(data);
+    function requestAdmin(path, options = {}) {
+      return WorkspaceData.requestJson(`${apiBase()}${path}`, { ...options, unauthorizedStatuses: [401, 403], onUnauthorized: () => showAdminGate('管理员会话已过期，请重新登录。') });
     }
 
     async function loadAgents() {
@@ -1236,28 +1017,33 @@
             <b>${esc(agentLabel(agent.key || agent.name))}</b>
             <span class="pill">${esc(promptIterationLabel(agent))}</span>
           </div>
-          <div class="small">${esc(agent.role)}</div>
+          <div class="small">${esc(DisplayText.message(agent.role))}</div>
           <div class="small">内部版本：${esc(promptInternalVersion(agent) || agent.version || '-')}</div>
           <div class="btn-row">
             <button data-agent-key="${esc(agent.key || '')}" onclick="showAgentPromptsFromButton(this)">查看提示词</button>
           </div>
         </div>
-      `).join('') || '<div class="small">暂无 Agent</div>';
-    }
-
-    async function loadPrompts() {
-      const data = await get('/api/prompts');
-      latestPrompts = data.prompts || [];
-      renderPrompts(latestPrompts);
+      `).join('') || '<div class="small">暂无智能体</div>';
     }
 
     async function loadFeedback() {
       try {
         const data = await get('/api/feedback/list?limit=100');
         latestFeedback = data.feedback || [];
+        feedbackLoaded = true;
+        feedbackLoadError = false;
+        $('feedbackSyncStatus').hidden = true;
+        $('feedbackSyncMessage').textContent = '';
         renderFeedback(latestFeedback);
       } catch (err) {
-        $('feedbackQueue').innerHTML = `<div class="small" style="color:var(--red);">读取反馈队列失败：${esc(err.message || err)}。请确认后端已重启并加载最新代码。</div>`;
+        feedbackLoadError = true;
+        $('feedbackSyncStatus').hidden = false;
+        $('feedbackSyncMessage').textContent = feedbackLoaded
+          ? '暂时无法同步，以下为上次加载的数据。检查连接后刷新重试。'
+          : '暂时无法加载反馈队列。检查连接后刷新重试。';
+        if (feedbackLoaded) renderFeedback(latestFeedback);
+        else $('feedbackQueue').innerHTML = '';
+        throw err;
       }
     }
 
@@ -1306,7 +1092,7 @@
         const selectedStage = $('auditStage')?.value || '';
         $('auditStatus').textContent = total ? `共 ${fmt(total)} 条，当前页为空。` : '未找到匹配审计日志。';
         $('auditLogs').innerHTML = selectedStage
-          ? `<div class="small">该阶段当前没有审计记录。Agent 是否执行请查看“Agent轨迹”。</div>`
+          ? `<div class="small">该阶段当前没有审计记录。智能体是否执行请查看“智能体轨迹”。</div>`
           : '<div class="small">暂无审计日志</div>';
         return;
       }
@@ -1322,12 +1108,13 @@
         const decision = item.decision ?? item.action ?? item.result ?? item.status ?? '-';
         const agentRaw = item.agentKey ?? item.agent_key ?? item.agentName ?? item.agent_name ?? item.agent;
         const agent = agentRaw ? agentLabel(agentRaw) : '审计记录';
-        const message = readableText(item.message ?? item.reason ?? item.summary ?? item.decisionSummary ?? '');
+        const messageValue = item.message ?? item.reason ?? item.summary ?? item.decisionSummary;
+        const message = messageValue ? DisplayText.report(DisplayText.humanize(messageValue)) : '';
         const evidence = readableText(item.evidence ?? item.evidence_json ?? item.evidenceJson ?? '');
-        const risk = readableText(item.risk ?? '');
+        const risk = item.risk ? DisplayText.report(DisplayText.humanize(item.risk)) : '';
         const keyword = item.sourceKeyword ?? item.source_keyword ?? item.keyword ?? item.query ?? '';
         const platform = item.platform ? ` · 平台：${esc(platformLabel(item.platform))}` : '';
-        const runText = item.runType ? ` · 批次：${esc(item.runType)}${item.runId ? '/' + esc(item.runId) : ''}` : '';
+        const runText = item.runType ? ` · 批次：${esc(DisplayText.code(item.runType, '任务执行'))}${item.runId ? '/' + esc(item.runId) : ''}` : '';
         const createdAt = item.createdAt ?? item.created_at ?? item.time ?? item.timestamp;
         const meta = auditMetaHtml(item);
         return `
@@ -1352,62 +1139,11 @@
       }).join('');
     }
 
-    async function loadAuditLogs(reset = false) {
-      if (!adminReady) return showAdminGate('请先登录 Harness。');
-      if (auditState.loading) return;
-      if (reset) {
-        auditState.offset = 0;
-        $('auditOffset').value = '0';
-      }
-      if (!$('auditTaskId').value.trim() && (latestTask?.taskId || currentTaskId)) {
-        $('auditTaskId').value = latestTask?.taskId || currentTaskId;
-      }
-      if (!$('auditTaskId').value.trim()) {
-        auditState.loaded = false;
-        auditState.hasMore = false;
-        $('auditPrev').disabled = true;
-        $('auditNext').disabled = true;
-        $('auditStatus').textContent = '请先选择任务或输入 Task ID。';
-        $('auditLogs').innerHTML = '<div class="small">暂无审计日志</div>';
-        return;
-      }
-      auditState.loaded = true;
-      auditState.loading = true;
-      $('auditPrev').disabled = true;
-      $('auditNext').disabled = true;
-      $('auditStatus').textContent = '正在读取审计日志...';
-      const queryBtn = $('auditQueryBtn');
-      const queryText = queryBtn?.textContent;
-      if (queryBtn) {
-        queryBtn.disabled = true;
-        queryBtn.textContent = '查询中...';
-      }
-      try {
-        const data = await post('/api/admin/tasks/audit', auditPayload());
-        renderAuditLogs(auditItemsFrom(data), data || {});
-      } catch (err) {
-        auditState.hasMore = false;
-        $('auditStatus').innerHTML = `<span style="color:var(--red);">读取失败：${esc(err.message || err)}</span>`;
-        $('auditLogs').innerHTML = '<div class="small">审计接口暂不可用或当前后端尚未实现该路径。</div>';
-      } finally {
-        auditState.loading = false;
-        if (queryBtn) {
-          queryBtn.disabled = false;
-          queryBtn.textContent = queryText;
-        }
-      }
-    }
-
     function pageAudit(direction) {
       const limit = Math.min(Math.max(Number($('auditLimit').value || auditState.limit || 100), 1), 100);
       auditState.offset = direction < 0 ? Math.max(0, auditState.offset - limit) : auditState.offset + limit;
       $('auditOffset').value = String(auditState.offset);
       loadAuditLogs(false);
-    }
-
-    function useCurrentTaskForAudit() {
-      $('auditTaskId').value = latestTask?.taskId || currentTaskId || '';
-      loadAuditLogs(true);
     }
 
     function resetAuditFilters() {
@@ -1424,76 +1160,73 @@
       $('auditLogs').innerHTML = '<div class="small">暂无审计日志</div>';
     }
 
-    function renderTask(data) {
+    function renderHarnessStageCoverage(data) {
+      const result = data.result || data;
+      const coverage = result.stageCoverage || data.stageCoverage;
+      const stages = WorkspaceData.stages;
+      const statuses = WorkspaceData.coverageStatuses;
+      const offering = (result.confirmedPlan || data.confirmedPlan || {}).offeringId === 'agent_custom_development' ? '智能体定制开发' : '通用关键词研究';
+      const header = `<p><b>本任务服务：</b>${esc(offering)} · <b>任务状态：</b>${esc(statusLabel(data.status))}</p>`;
+      if (coverage && typeof coverage === 'object' && !Array.isArray(coverage)) {
+        const scope = result.stageCoverageScope || data.stageCoverageScope;
+        const rounds = result.roundStageCoverage || data.roundStageCoverage;
+        const scopeHint = scope === 'executed_rounds'
+          ? `<p><b>批量覆盖：按已执行轮次累计</b>${Array.isArray(rounds) ? `（当前记录 ${fmt(rounds.length)} 轮）` : ''}。查询组合在各轮分别计数，不能与单轮计划数量直接比较。</p>`
+          : '';
+        return header + scopeHint + '<div class="grid two">' + Object.entries(stages).map(([key, label]) => {
+          const row = coverage[key] || {}, view = window.TaskInsights?.stageView(row);
+          const counts = view ? view.showCounts : Number.isInteger(row.completed) && row.completed >= 0 && Number.isInteger(row.total) && row.total >= 0;
+          const reason = view?.reason || row.reason;
+          const unit = WorkspaceData.coverageUnits[row.unit] || '项（单位未记录）';
+          return `<div class="item"><b>${esc(label)}：${esc(view?.label || statuses[row.status] || '完成情况未记录')}</b>${counts ? `<div>${fmt(row.completed)} / ${fmt(row.total)} ${esc(unit)}</div>` : ''}${reason ? `<div>${esc(DisplayText.message(reason))}</div>` : ''}${row.error ? `<div>${esc(DisplayText.message(row.error))}</div>` : ''}</div>`;
+        }).join('') + '</div>';
+      }
+      const hasQa = result.qa && typeof result.qa === 'object' && Object.keys(result.qa).length > 0;
+      const hasReport = result.report && typeof result.report === 'object' && Object.keys(result.report).length > 0;
+      return header + `<p>此任务没有逐阶段完成记录，不能按已保存笔记或候选数量认定全部分析完成。</p>
+        <p>已保存笔记 ${fmt((result.notes || data.notes || []).length)} 篇；候选 ${fmt((result.leads?.leads || data.leads?.leads || []).length)} 条，完整性未记录。</p>
+        <p><b>质量核验：</b>${hasQa ? '已有质检产物；完整性未记录' : '未见已保存的质检产物，未确认完成'}</p>
+        <p><b>报告生成：</b>${hasReport ? '已有报告产物；完整性未记录' : '未见已保存的报告，未确认完成'}</p>`;
+    }
+
+    function renderTaskSummary(data) {
       const trace = data.agentTrace || [];
       const summary = data.taskSummary || {};
       const leads = data.leads?.leads || [];
-      const candidateCount = (data.promptVersionSummary || latestPrompts || []).reduce((sum, item) => sum + Number(item.candidates || (item.status === 'candidate' ? 1 : 0)), 0);
-      $('currentTask').innerHTML = `
-        <b>#${fmt(data.taskId)} · ${esc(statusLabel(data.status))}</b>
-        <div class="small">${esc(data.statusText || '')}</div>
-        <div class="small">更新：${formatTime(data.updatedAt)}</div>
-      `;
+      const evolution = data.evolution || data.result?.evolution || {};
+      const candidateCount = window.TaskInsights ? TaskInsights.evolution(data, latestPrompts, evaluationRuns).candidates.length : (evolution.candidatePromptIds || []).length;
+      $('harnessStageCoverage').innerHTML = renderHarnessStageCoverage(data);
       $('overview').innerHTML = `
-        <div class="metric"><b>${fmt(trace.length)}</b><span class="small">Agent 调用</span></div>
+        <div class="metric"><b>${fmt(trace.length)}</b><span class="small">智能体调用</span></div>
         <div class="metric"><b>${fmt(leads.length)}</b><span class="small">线索</span></div>
-        <div class="metric"><b>${fmt(candidateCount)}</b><span class="small">候选版本</span></div>
+        <div class="metric"><b>${fmt(candidateCount)}</b><span class="small">关联改进版本</span></div>
         <div class="metric"><b>${esc(statusLabel(data.status))}</b><span class="small">任务状态</span></div>
       `;
-      $('trace').innerHTML = trace.length ? trace.map(run => `
-        <div class="item">
-          <div class="item-head">
-            <b>${esc(agentLabel(run.agentKey || run.agentName))}</b>
-            <span class="pill">${Math.round(Number(run.confidence || 0) * 100)}%</span>
-          </div>
-          <div class="small">${esc(purposeLabel(run.purpose))} · ${esc(run.promptVersion || '')} · 批次：${esc(run.runType || 'main')}${run.runId ? '/' + esc(run.runId) : ''} · ${fmt(run.durationMs)}ms · ${formatTime(run.createdAt)}</div>
-          ${run.error ? `<div class="small" style="color:var(--red);">${esc(run.error)}</div>` : ''}
-          <div class="trace-output">${textBlock(run.outputSummary)}</div>
-        </div>
-      `).join('') : '<div class="small">暂无 Agent 执行轨迹</div>';
       const agentSummaries = summary.agent_summaries || summary.agentSummaries || [];
       $('summary').innerHTML = `
         <div class="item">
           <h3>本次任务总结</h3>
-          <div class="small">${esc(summary.task_summary || summary.decision || data.evolutionSummary || '暂无复盘')}</div>
+          <div class="small">${esc(DisplayText.report(DisplayText.humanize(summary.task_summary || summary.decision || '尚无独立的任务总结。')))}</div>
         </div>
         <div class="item">
-          <h3>自动进化</h3>
-          <div class="small">${esc(summary.evolution_summary || data.evolutionSummary || '暂无进化记录')}</div>
+          <h3>候选改进（需评测后手动启用）</h3>
+          <div class="small">${esc(DisplayText.report(DisplayText.humanize(evolution.summary || summary.evolution_summary || data.evolutionSummary || (candidateCount ? '已记录关联改进版本；评测与启用状态见上方。' : '尚无已保存的复盘建议。'))))}</div>
         </div>
         ${agentSummaries.map(item => `
           <div class="item" id="summaryItem-${Number(item.id)}">
             <h3>${esc(agentLabel(item.agentKey || item.agent || item.agentName))}</h3>
-            <div class="small">${esc(item.recommendation || item.weaknesses || item.strengths || '')}</div>
+            <div class="small">${esc(DisplayText.report(DisplayText.humanize(item.recommendation || item.weaknesses || item.strengths || '')))}</div>
           </div>
         `).join('')}
       `;
-      const events = data.events || [];
+      const events = (data.events || []).filter(event => !['Model Usage', '模型用量'].includes(event.agent));
       $('events').innerHTML = events.length ? events.map(e => `
         <div class="event">
           <div class="time">${formatTime(e.createdAt)}</div>
-          <div class="agent">${esc(agentLabel(e.agent || '-'))}</div>
-          <div>${esc(e.message || '')}</div>
+          <div class="agent">${esc(agentLabel(e.agent || '-'))} <span class="pill ${e.level === 'error' ? 'drop' : e.level === 'warning' ? 'pending' : e.level === 'success' ? 'pass' : ''}">${esc(({info:'信息',warning:'警告',error:'错误',success:'成功',debug:'调试'})[e.level] || '信息')}</span></div>
+          <div>${esc(DisplayText.message(e.message || ''))}</div>
         </div>
       `).join('') : '<div class="small">暂无事件</div>';
-    }
-
-    function renderPrompts(prompts) {
-      $('prompts').innerHTML = prompts.length ? prompts.map(prompt => `
-        <div class="item">
-          <div class="item-head">
-            <b>${esc(agentLabel(prompt.agentKey || prompt.agentName))} · ${esc(promptIterationLabel(prompt))}</b>
-            <span class="pill ${esc(prompt.status)}">${esc(promptStatusLabel(prompt.status))}</span>
-          </div>
-          <div class="small">内部版本：${esc(prompt.version || '-')} · 评分 ${Number(prompt.score || 0).toFixed(2)} · ${esc(prompt.notes || '')}</div>
-          <div class="small">来源任务：${prompt.sourceTaskId || '-'}</div>
-          <div class="btn-row">
-            ${prompt.status === 'active' ? `<button data-agent-key="${esc(prompt.agentKey || '')}" onclick="showAgentPromptsFromButton(this)">查看该 Agent 全部提示词</button>` : ''}
-            ${prompt.status !== 'active' && prompt.status !== 'disabled' ? `<button class="primary" onclick="promotePrompt(${Number(prompt.id)})">设为当前版本</button>` : ''}
-            ${prompt.status !== 'disabled' ? `<button class="danger" onclick="disablePrompt(${Number(prompt.id)})">${disableLabel(prompt.status)}</button>` : ''}
-          </div>
-        </div>
-      `).join('') : '<div class="small">暂无提示词版本</div>';
     }
 
     function showAgentPromptsFromButton(button) {
@@ -1501,73 +1234,28 @@
       showAgentPrompts(agentKey);
     }
 
-    async function showAgentPrompts(agentKey) {
-      if (!agentKey) return alert('找不到 Agent key');
-      $('promptModalTitle').textContent = `${agentLabel(agentKey)} 的提示词`;
-      $('promptModalBody').innerHTML = '<div class="small">正在读取提示词...</div>';
-      $('promptModalMask').style.display = 'flex';
-      try {
-        const data = await get(`/api/prompts?agentKey=${encodeURIComponent(agentKey)}`);
-        renderAgentPromptModal(agentKey, data.prompts || []);
-      } catch (err) {
-        $('promptModalBody').innerHTML = `<div class="small" style="color:var(--red);">读取失败：${esc(err.message || err)}</div>`;
-      }
-    }
-
-    function renderAgentPromptModal(agentKey, prompts) {
-      if (!prompts.length) {
-        $('promptModalBody').innerHTML = `<div class="small">暂无 ${esc(agentLabel(agentKey))} 的提示词版本。</div>`;
-        return;
-      }
-      $('promptModalBody').innerHTML = `
-        <div class="prompt-list">
-          ${prompts.map(prompt => {
-            const internal = prompt.version || '-';
-            const iteration = promptIterationLabel(prompt);
-            const open = prompt.status === 'active' ? ' open' : '';
-            return `
-              <div class="item">
-                <div class="item-head">
-                  <div>
-                    <b>${esc(iteration)} · ${esc(promptStatusLabel(prompt.status))}</b>
-                    <div class="small">内部版本：${esc(internal)} · 评分 ${Number(prompt.score || 0).toFixed(2)} · 来源任务：${prompt.sourceTaskId || '-'}</div>
-                  </div>
-                  <span class="pill ${esc(prompt.status)}">${esc(promptStatusLabel(prompt.status))}</span>
-                </div>
-                ${prompt.notes ? `<div class="small">说明：${esc(prompt.notes)}</div>` : ''}
-                <details${open}>
-                  <summary>提示词全文</summary>
-                  <div class="prompt-output">${textBlock(prompt.prompt || '', 24000)}</div>
-                </details>
-              </div>
-            `;
-          }).join('')}
-        </div>
-      `;
-    }
-
-    function closeAgentPromptModal() {
-      $('promptModalMask').style.display = 'none';
-    }
-
-    function renderFeedback(items) {
+    function renderFeedbackItems(items) {
+      if (feedbackLoadError && !feedbackLoaded) { $('feedbackQueue').innerHTML = ''; return; }
       $('feedbackQueue').innerHTML = items.length ? items.map(item => {
         const analysis = item.analysis || {};
         const targetAgents = analysis.target_agents || analysis.targetAgents || [];
         const diagnosis = analysis.diagnosis || analysis.decision || '';
         const improvements = analysis.prompt_improvements || analysis.promptImprovements || [];
+        const candidateId = Number(item.candidatePromptId ?? item.candidate_prompt_id);
+        const hasCandidate = Number.isSafeInteger(candidateId) && candidateId > 0;
         return `
           <div class="item" id="feedbackItem-${Number(item.id)}">
             <div class="item-head">
-              <b>#${fmt(item.id)} · ${esc(FEEDBACK_LABELS[item.feedbackType] || item.feedbackType)}</b>
+              <b>#${fmt(item.id)} · ${esc(FEEDBACK_LABELS[item.feedbackType] || DisplayText.code(item.feedbackType, '其他反馈'))}</b>
               <span class="pill ${esc(item.status)}">${esc(feedbackStatusLabel(item.status))}</span>
             </div>
-            <div class="small">任务 #${item.taskId || '-'} · 线索 ${esc(item.leadId || '-')} · 目标 ${esc(targetAgents.map(agentLabel).join('、') || item.targetAgentKey || '-')} · ${formatTime(item.updatedAt)}</div>
+            <div class="small">任务 #${item.taskId || '-'} · 线索 ${esc(item.leadId || '-')} · 目标 ${esc(targetAgents.map(agentLabel).join('、') || (item.targetAgentKey ? agentLabel(item.targetAgentKey) : '未指定'))} · ${formatTime(item.updatedAt)}</div>
             <div class="small">反馈：${esc(item.feedback || '-')}；说明：${esc(item.userNote || '-')}</div>
             <div class="feedback-output">${textBlock({ evidence: item.evidence, diagnosis, recommended_action: analysis.recommended_action, improvements }, 1200)}</div>
             <div class="btn-row">
-              ${item.status === 'pending' ? `<button class="primary" onclick="analyzeFeedback(${Number(item.id)})">AI 分析</button>` : ''}
-              ${item.status === 'analyzed' ? `<button class="primary" onclick="applyFeedback(${Number(item.id)})">确认应用</button>` : ''}
+              ${item.status === 'pending' ? `<button class="primary" onclick="analyzeFeedback(${Number(item.id)})">模型分析</button>` : ''}
+              ${item.status === 'analyzed' ? `<button class="primary" onclick="applyFeedback(${Number(item.id)})">创建候选</button>` : ''}
+              ${hasCandidate ? `<button onclick="openCandidateDetail(${candidateId})">查看关联候选</button>` : ''}
               ${item.status === 'pending' || item.status === 'analyzed' ? `<button class="danger" onclick="dismissFeedback(${Number(item.id)})">忽略</button>` : ''}
             </div>
             <div class="feedback-action" id="feedbackAction-${Number(item.id)}"></div>
@@ -1593,55 +1281,23 @@
       if (!item || !action) return;
       item.querySelectorAll('button').forEach(button => button.disabled = false);
       action.className = 'feedback-action error';
-      action.textContent = message;
+      action.textContent = DisplayText.message(message);
     }
 
     function clearFeedbackBusy(feedbackId) {
       busyFeedback.delete(Number(feedbackId));
     }
 
-    async function promotePrompt(promptId) {
-      await post('/api/prompts/promote', { promptId });
-      await loadPrompts();
-      if (currentTaskId) await loadTask(currentTaskId);
-    }
-
-    async function disablePrompt(promptId) {
-      await post('/api/prompts/disable', { promptId });
-      await loadPrompts();
-      if (currentTaskId) await loadTask(currentTaskId);
-    }
-
-    async function runEval() {
-      if (!currentTaskId) return alert('暂无任务可评估');
-      const result = await post('/api/evals/run', { taskId: currentTaskId });
-      alert(`评估完成：评分 ${Number(result.score || 0).toFixed(2)}`);
-      await loadTask(currentTaskId);
-    }
-
     async function analyzeFeedback(feedbackId) {
       if (busyFeedback.has(Number(feedbackId))) return;
-      setFeedbackBusy(feedbackId, 'AI 分析中，正在调用 LLM 读取反馈、原始证据和当前 Prompt，通常需要几十秒...');
+      setFeedbackBusy(feedbackId, '模型分析中，正在调用模型读取反馈、原始证据和当前提示词，通常需要几十秒...');
       try {
         await post('/api/feedback/analyze', { feedbackId });
         clearFeedbackBusy(feedbackId);
         await loadFeedback();
         if (currentTaskId) await loadTask(currentTaskId);
       } catch (err) {
-        setFeedbackError(feedbackId, `AI 分析失败：${err.message || err}`);
-      }
-    }
-
-    async function applyFeedback(feedbackId) {
-      if (busyFeedback.has(Number(feedbackId))) return;
-      setFeedbackBusy(feedbackId, '正在应用修改策略，创建并启用新的运行时 Prompt/Skill 版本...');
-      try {
-        await post('/api/feedback/apply', { feedbackId });
-        clearFeedbackBusy(feedbackId);
-        await Promise.all([loadFeedback(), loadPrompts()]);
-        if (currentTaskId) await loadTask(currentTaskId);
-      } catch (err) {
-        setFeedbackError(feedbackId, `应用失败：${err.message || err}`);
+        setFeedbackError(feedbackId, `模型分析失败：${err.message || err}`);
       }
     }
 
@@ -1657,114 +1313,102 @@
       }
     }
 
-    async function loadSettings(force = false) {
-      if (!adminReady) return showAdminGate('请先登录 Harness。');
-      if (settingsLoaded && !force) return;
+    async function readSettingsIntoForm() {
+      if (!adminReady) return showAdminGate('请先登录管理后台。');
       try {
         const s = await get('/api/settings');
-        settingsConfig = s || {};
         $('settingApiBase').value = s.llm?.api_base || '';
         $('settingModel').value = s.llm?.model || '';
         $('settingTemperature').value = s.llm?.temperature ?? 0.6;
+        $('settingConnectTimeout').value = s.llm?.connect_timeout_s ?? 30;
+        $('settingReadTimeout').value = s.llm?.read_timeout_s ?? 60;
+        $('settingTotalTimeout').value = s.llm?.total_timeout_s ?? 300;
         $('settingApiKey').value = '';
         $('apiKeyHelp').textContent = s.llm?.has_api_key
-          ? '当前已配置 API Key。为安全起见不会回显；留空保存会保留原 Key。'
-          : '当前未配置 API Key。请输入中转站 Key 后保存。';
+          ? '当前已配置模型访问密钥。为安全起见不会回显；留空保存会保留原密钥。'
+          : '当前未配置模型访问密钥。请输入模型服务密钥 后保存。';
         $('settingXhsBin').value = s.xhs?.bin || '';
         const enabledPlatforms = s.platforms?.enabled || ['xhs'];
         $('settingPlatformXhs').checked = enabledPlatforms.includes('xhs');
         $('settingPlatformDouyin').checked = enabledPlatforms.includes('douyin');
-        if ($('settingBusinessDirection')) {
-          $('settingBusinessDirection').innerHTML = businessDirectionOptions(s.sales?.default_business_direction || 'cloud_ai');
-          $('settingBusinessDirection').value = s.sales?.default_business_direction || 'cloud_ai';
-          $('settingBusinessDirection').onchange = updateSettingBusinessDirectionHelp;
-          updateSettingBusinessDirectionHelp();
-        }
         $('settingOpencliBin').value = s.opencli?.bin || '';
         $('settingSocialDataxEnv').value = s.socialdatax?.api_key_env || 'SOCIALDATAX_API_KEY';
         $('socialDataxHelp').textContent = s.socialdatax?.has_api_key
           ? `已检测到环境变量 ${s.socialdatax?.api_key_env || 'SOCIALDATAX_API_KEY'}。`
           : `未检测到环境变量 ${s.socialdatax?.api_key_env || 'SOCIALDATAX_API_KEY'}；抖音只读扫描会失败。`;
-        $('settingDelayMin').value = s.xhs?.read_delay_min ?? 7;
-        $('settingDelayMax').value = s.xhs?.read_delay_max ?? 60;
-        $('settingMaxComments').value = s.xhs?.max_comments_per_note ?? 50;
         $('settingEnableFollowActions').checked = Boolean(s.xhs?.enable_follow_actions);
-        $('settingDouyinMaxComments').value = s.douyin?.max_comments_per_post ?? 50;
         $('settingDouyinFollowActions').checked = Boolean(s.douyin?.enable_follow_actions);
         $('settingDouyinDmActions').checked = Boolean(s.douyin?.enable_dm_actions);
         $('settingRedactUser').checked = Boolean(s.sales?.redact_user);
         settingsLoaded = true;
       } catch (err) {
-        alert('读取设置失败：' + (err.message || err));
+        adminNotice('读取设置失败：' + (err.message || err));
       }
     }
 
-    async function openSettings() {
-      setActivePage('settings');
-      await loadSettings(true);
+    function readLlmTimeoutSettings() {
+      const fields = [
+        ['connect_timeout_s', 'settingConnectTimeout', '模型连接超时'],
+        ['read_timeout_s', 'settingReadTimeout', '首响应与流空闲超时'],
+        ['total_timeout_s', 'settingTotalTimeout', '本次分析总时限']
+      ];
+      const settings = {};
+      for (const [key, id, label] of fields) {
+        const input = String($(id).value).trim();
+        const seconds = Number(input);
+        if (!input || !Number.isFinite(seconds) || !Number.isInteger(seconds) || seconds < 1 || seconds > 86400) {
+          throw new Error(`${label}必须为 1–86400 的整数秒。`);
+        }
+        settings[key] = seconds;
+      }
+      return settings;
     }
 
-    function closeSettings() {
-      setActivePage('overview');
-    }
-
-    async function saveSettings() {
-      return withButtonBusy('saveSettingsBtn', '正在保存...', async () => {
-        const body = {
-          llm: {
-            api_base: $('settingApiBase').value.trim(),
-            model: $('settingModel').value.trim(),
-            temperature: Number($('settingTemperature').value || 0.6)
-          },
-          xhs: {
-            bin: $('settingXhsBin').value.trim(),
-            read_delay_min: Number($('settingDelayMin').value || 7),
-            read_delay_max: Number($('settingDelayMax').value || 60),
-            max_comments_per_note: Number($('settingMaxComments').value || 50),
-            enable_follow_actions: $('settingEnableFollowActions').checked
-          },
-          platforms: {
-            enabled: [
-              $('settingPlatformXhs').checked ? 'xhs' : '',
-              $('settingPlatformDouyin').checked ? 'douyin' : ''
-            ].filter(Boolean)
-          },
-          opencli: {
-            bin: $('settingOpencliBin').value.trim()
-          },
-          socialdatax: {
-            api_key_env: $('settingSocialDataxEnv').value.trim() || 'SOCIALDATAX_API_KEY'
-          },
-          douyin: {
-            max_comments_per_post: Number($('settingDouyinMaxComments').value || 50),
-            enable_follow_actions: $('settingDouyinFollowActions').checked,
-            enable_dm_actions: $('settingDouyinDmActions').checked
-          },
-          sales: {
-            redact_user: $('settingRedactUser').checked,
-            default_business_direction: $('settingBusinessDirection')?.value || 'cloud_ai'
-          }
-        };
-        if (!body.platforms.enabled.length) {
-          return alert('请至少保留一个默认采集平台。');
+    function readSettingsForm() {
+      const body = {
+        llm: {
+          api_base: $('settingApiBase').value.trim(),
+          model: $('settingModel').value.trim(),
+          temperature: Number($('settingTemperature').value || 0.6),
+          ...readLlmTimeoutSettings()
+        },
+        xhs: {
+          bin: $('settingXhsBin').value.trim(),
+          enable_follow_actions: $('settingEnableFollowActions').checked
+        },
+        platforms: {
+          enabled: [
+            $('settingPlatformXhs').checked ? 'xhs' : '',
+            $('settingPlatformDouyin').checked ? 'douyin' : ''
+          ].filter(Boolean)
+        },
+        opencli: {
+          bin: $('settingOpencliBin').value.trim()
+        },
+        socialdatax: {
+          api_key_env: $('settingSocialDataxEnv').value.trim() || 'SOCIALDATAX_API_KEY'
+        },
+        douyin: {
+          enable_follow_actions: $('settingDouyinFollowActions').checked,
+          enable_dm_actions: $('settingDouyinDmActions').checked
+        },
+        sales: {
+          redact_user: $('settingRedactUser').checked
         }
-        if (/^(sk-|sdx-)/i.test(body.socialdatax.api_key_env)) {
-          return alert('SocialDataX 字段只填写环境变量名，例如 SOCIALDATAX_API_KEY；不要粘贴真实 Key。');
-        }
-        const apiKey = $('settingApiKey').value.trim();
-        if (apiKey) body.llm.api_key = apiKey;
-        try {
-          await post('/api/settings', body);
-          settingsLoaded = true;
-          alert('设置已保存。');
-        } catch (err) {
-          alert('保存设置失败：' + (err.message || err));
-        }
-      });
+      };
+      if (!body.platforms.enabled.length) {
+        throw new Error('请至少保留一个默认采集平台。');
+      }
+      if (/^(sk-|sdx-)/i.test(body.socialdatax.api_key_env)) {
+        throw new Error('SocialDataX 字段只填写环境变量名，例如 SOCIALDATAX_API_KEY；不要粘贴真实密钥。');
+      }
+      const apiKey = $('settingApiKey').value.trim();
+      if (apiKey) body.llm.api_key = apiKey;
+      return body;
     }
 
     window.addEventListener('DOMContentLoaded', () => {
-      wireButtonFeedback();
+      window.WorkspaceUI?.wireButtonFeedback();
       $('adminPassword').addEventListener('keydown', event => {
         if (event.key === 'Enter') adminSetupMode ? setupAdmin() : adminLogin();
       });
@@ -1778,9 +1422,12 @@
       });
       resetAuditFilters();
       bootAdmin().catch(err => {
-        $('currentTask').textContent = '读取失败：' + (err.message || err);
+        $('currentTask').textContent = '读取失败：' + DisplayText.message(err.message || err);
       });
     });
   </script>
+  <script src="task-insights.js"></script>
+  <script src="harness-evaluations.js"></script>
+  <script src="harness-workspace.js"></script>
 </body>
 </html>

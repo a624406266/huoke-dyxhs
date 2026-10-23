@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import Mock
 from pathlib import Path
 from typing import Any
 
@@ -137,7 +137,9 @@ class DouyinRunner:
                 "productDistribution": [],
             }
         if agent_key == "critic_qa_agent":
-            return {**base, "approved": True, "issues": [], "review_requests": []}
+            return {**base, "approved": True, "issues": [], "review_requests": [],
+                "reviews": [{"target_id": lead["lead_id"], "status": "approved", "reason": "原文支持"}
+                            for lead in payload["leads"]]}
         if agent_key == "report_agent":
             return {**base, "summary": "识别到抖音评论线索。", "insights": [], "recommended_actions": [], "productDistribution": []}
         if agent_key == "reflection_evolution_agent":
@@ -179,13 +181,22 @@ class DouyinPlatformTests(unittest.TestCase):
         self.assertEqual(comment["id"], "douyin:comment-1")
         self.assertEqual(comment["user_info"]["sec_user_id"], "sec-user-1")
 
-    def test_douyin_comment_fallback_id_is_stable(self) -> None:
-        comment = {"text": "想了解报价", "user": {"nickname": "用户"}}
-        first = normalized_douyin_comment(comment, "aweme-1")
-        second = normalized_douyin_comment(comment, "aweme-1")
-        self.assertIsNotNone(first)
-        self.assertEqual(first["id"], second["id"])
-        self.assertTrue(first["id"].startswith("douyin:"))
+    def test_douyin_missing_comment_id_remains_missing(self) -> None:
+        comment = normalized_douyin_comment({"text": "想了解报价", "user": {"nickname": "用户"}}, "aweme-1")
+        self.assertIsNotNone(comment)
+        self.assertEqual(comment["id"], "")
+        self.assertEqual(comment["raw_comment_id"], "")
+        self.assertEqual(comment["source_comment_id"], "")
+        self.assertTrue(comment["id_is_synthetic"])
+
+    def test_douyin_search_rejects_unimplemented_pages_before_provider_call(self) -> None:
+        adapter = FakeDouyinReadAdapter()
+        adapter.search("AI客服", page=1)
+        first_calls = list(adapter.calls)
+        for page in (2, 0, -1, True, "1"):
+            with self.subTest(page=page), self.assertRaisesRegex(ValueError, "尚未支持分页"):
+                adapter.search("AI客服", page=page)
+        self.assertEqual(adapter.calls, first_calls, "unsupported pages must not repeat a paid first-page request")
 
     def test_douyin_socialdatax_flat_fields_are_normalized(self) -> None:
         adapter = FakeDouyinReadAdapter()
@@ -214,76 +225,20 @@ class DouyinPlatformTests(unittest.TestCase):
         self.assertEqual(flat["note_card"]["user"]["sec_user_id"], "sec-author-flat")
         self.assertEqual(flat["note_card"]["tag_list"][0]["name"], "企业AI")
 
-    def test_douyin_browser_action_adapter_success_and_failure(self) -> None:
-        helper = FakeActionHelper([
-            {"ok": True, "message": "followed"},
-            {"ok": False, "message": "未找到抖音私信入口"},
-        ])
+    def test_douyin_browser_action_adapter_delegates_verified_contract(self) -> None:
+        helper = FakeActionHelper([])
         adapter = DouyinBrowserActionAdapter(helper)  # type: ignore[arg-type]
+        adapter._browser = Mock()
+        identity = {"identity": "douyin:account-fixture"}
+        adapter._browser.account_identity.return_value = identity
+        action = {"action": "send_dm", "accountIdentity": identity["identity"], "targetUserId": "sec-user", "text": "你好"}
+        result = {"status": "unknown", "submitted": True, "error": "没有可核验回执", "evidence": {}}
+        adapter._browser.execute.return_value = result
         adapter.ensure_authenticated()
         self.assertTrue(helper.confirmed)
-        self.assertTrue(adapter.follow_user("sec-user")["ok"])
-        with self.assertRaises(RuntimeError) as ctx:
-            adapter.send_dm("sec-user", "你好")
-        self.assertIn("私信入口", str(ctx.exception))
-
-    def test_storage_migrates_platform_default_for_legacy_rows(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        db_path = Path(tmp.name) / "legacy.db"
-        conn = sqlite3.connect(db_path)
-        try:
-            conn.executescript(
-                """
-                CREATE TABLE tasks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    sales_user_id INTEGER NOT NULL DEFAULT 0,
-                    status TEXT NOT NULL,
-                    keyword TEXT
-                );
-                INSERT INTO tasks(id, sales_user_id, status, keyword) VALUES (1, 0, 'running', 'old');
-                CREATE TABLE comments (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    sales_user_id INTEGER NOT NULL DEFAULT 0,
-                    comment_id TEXT NOT NULL,
-                    task_id INTEGER,
-                    note_id TEXT,
-                    nickname TEXT,
-                    user_id TEXT,
-                    content TEXT,
-                    payload TEXT,
-                    created_at REAL,
-                    UNIQUE(sales_user_id, comment_id)
-                );
-                INSERT INTO comments(sales_user_id, comment_id, task_id, note_id, nickname, user_id, content, payload, created_at)
-                VALUES (0, 'c-old', 1, 'n-old', '旧用户', 'u-old', '旧评论', '{}', 1);
-                CREATE TABLE leads (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    sales_user_id INTEGER NOT NULL DEFAULT 0,
-                    lead_id TEXT NOT NULL,
-                    task_id INTEGER,
-                    note_id TEXT,
-                    comment_id TEXT,
-                    score INTEGER,
-                    priority TEXT,
-                    product_tags TEXT,
-                    demand_summary TEXT,
-                    evidence TEXT,
-                    outreach_copy TEXT,
-                    feedback TEXT,
-                    payload TEXT,
-                    created_at REAL,
-                    UNIQUE(sales_user_id, lead_id)
-                );
-                INSERT INTO leads(sales_user_id, lead_id, task_id, note_id, comment_id, score, priority, payload, created_at)
-                VALUES (0, 'n-old:c-old', 1, 'n-old', 'c-old', 80, 'B', '{}', 1);
-                """
-            )
-        finally:
-            conn.close()
-        storage = SalesStorage(db_path)
-        self.assertEqual(storage.get_comment("c-old")["platform"], "xhs")
-        self.assertEqual(storage.get_lead("n-old:c-old")["platform"], "xhs")
+        self.assertEqual(adapter.account_identity(), identity)
+        self.assertEqual(adapter.execute(action), result)
+        adapter._browser.execute.assert_called_once_with(action)
 
     def test_pipeline_runs_douyin_only_and_prefixes_douyin_lead_ids(self) -> None:
         storage = self.make_storage()
@@ -297,7 +252,8 @@ class DouyinPlatformTests(unittest.TestCase):
             "sales": {"default_min_score": 60, "default_business_direction": "cloud_ai", "redact_user": False},
         }
         result = HarnessPipeline(FakePlatformRegistry(adapter), config, storage, runner=DouyinRunner(storage, task_id)).run(
-            {"demandDescription": "找抖音 AI 客服报价线索", "platforms": ["douyin"], "delayMin": 0, "delayMax": 0},
+            {"confirmedPlan": {"seedKeywords": ["AI客服 报价"], "keywords": ["AI客服 报价"],
+                "searchGoal": "找抖音 AI 客服报价线索", "platforms": ["douyin"], "delayMin": 0, "delayMax": 0}},
             task_id=task_id,
             event_callback=lambda *args, **kwargs: None,
             progress_callback=lambda *args, **kwargs: None,

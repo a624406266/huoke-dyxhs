@@ -1,6 +1,2 @@
-# Core backend modules currently use the Python standard library.
-xiaohongshu-cli==0.6.4
-qrcode[pil]>=7.4,<8
-
-# Optional: only needed if you explicitly use the browser login helper.
-playwright>=1.45,<2
+# Single dependency manifest for every launcher and local environment.
+-r xhs-ops-demo-skill/requirements-local.txt

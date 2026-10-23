@@ -19,10 +19,38 @@ build/
 
 # Local sales-workbench runtime state
 .env
+.env.*
+!.env.example
 xhs-ops-demo-skill/.env
 xhs-ops-demo-skill/config.local.json
+xhs-ops-demo-skill/config.local.*.json
 xhs-ops-demo-skill/.runtime/
 xhs-ops-demo-skill/data/
 xhs-ops-demo-skill/exports/
 xhs-ops-demo-skill/logs/
 deploy-package-*.tar.gz
+
+# Local dependencies and generated runtime files
+node_modules/
+.venv/
+.pytest_cache/
+*.log
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+chrome-profile/
+browser-profiles/
+.xiaohongshu-cli/
+xhs-ops-demo-skill/_user_meta.json
+
+# Local development evidence: never ship with a clean project
+docs/2026-07-08-agent-optimization-update.md
+docs/2026-07-08-project-summary.md
+docs/keyword-workbench-v3/ui-screenshots/
+docs/keyword-workbench-v3/ui-audit-2026-10-21/
+docs/keyword-workbench-v3/ui-redesign.md
+docs/keyword-workbench-v3/ui-polish-audit.md
+xhs-ops-demo-skill/tests/generate_ui_audit_gallery.py

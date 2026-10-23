@@ -19,9 +19,6 @@ args=(scripts/launch_local.py --host "$HOST" --port "$PORT")
 if [[ "${NO_OPEN:-}" == "1" ]]; then
   args+=(--no-open)
 fi
-if [[ "${WITH_PLAYWRIGHT:-}" == "1" ]]; then
-  args+=(--with-playwright)
-fi
 
 echo "Starting local open lead workbench on http://${HOST}:${PORT}/index.html"
 exec "$PYTHON_BIN" "${args[@]}"

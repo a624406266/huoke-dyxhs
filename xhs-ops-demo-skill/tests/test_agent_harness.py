@@ -17,6 +17,7 @@ if str(SCRIPTS) not in sys.path:
 from agent_harness.evaluator import HarnessEvaluator
 from agent_harness.feedback import FeedbackLearningService
 from agent_harness.pipeline import HarnessPipeline
+from agent_harness.planning import normalize_plan
 from agent_harness.registry import PromptRegistry
 from config_loader import DEFAULT_CONFIG
 from llm_client import extract_json_text
@@ -223,7 +224,9 @@ class FakeRunner:
                 "productDistribution": [{"tag": "cloud_agent", "label": "腾讯云代理 / 优惠采购", "count": 1}],
             }
         if agent_key == "critic_qa_agent":
-            return {**base, "approved": True, "issues": [], "review_requests": []}
+            return {**base, "approved": True, "issues": [], "review_requests": [],
+                "reviews": [{"target_id": lead["lead_id"], "status": "approved", "reason": "原文支持"}
+                            for lead in payload["leads"]]}
         if agent_key == "report_agent":
             return {**base, "summary": "识别到 1 条腾讯云续费降本线索。", "insights": ["需求集中在续费成本"], "recommended_actions": ["人工核验后跟进"], "productDistribution": [{"tag": "cloud_agent", "label": "腾讯云代理 / 优惠采购", "count": 1}]}
         if agent_key == "reflection_evolution_agent":
@@ -258,199 +261,102 @@ def make_note_item(note_id: str, title: str, desc: str, author: str, comments: i
     }
 
 
-class Task3RegressionAdapter:
-    command = ["fake-xhs"]
+# Handwritten synthetic evidence; no historical task, customer or platform content.
+SYNTHETIC_AUTHOR_BODY = "合成场景：准备了12万元，希望委托开发内部工单助手，并连接自建工单系统。"
+SYNTHETIC_LOCAL_QUESTION = "合成场景：能给工单台开发一个自动分派模块吗？"
+SYNTHETIC_REMOTE_QUESTION = "合成场景：小团队想选一套工单助手，有入门预算的方案吗？"
+SYNTHETIC_STUDY_COMMENT = "合成场景：只想阅读课程示例，暂时不需要采购或开发。"
+
+
+class SyntheticRegionalAdapter:
+    command = ["synthetic-platform"]
 
     def ensure_authenticated(self) -> None:
         return None
 
     def search(self, keyword: str, page: int = 1) -> dict[str, Any]:
-        return {
-            "data": {
-                "items": [
-                    make_note_item(
-                        "n-author",
-                        "20W能私有化部署AI客服吗？",
-                        "老板给了20w预算，想找人部署多语言AI客服，本地化部署并对接内部系统。",
-                        "盐甜笔记",
-                        comments=0,
-                    ),
-                    make_note_item(
-                        "n-comment",
-                        "深圳AI客服接入企业微信方案",
-                        "面向电商和企业微信的AI客服落地方案。",
-                        "方案作者",
-                        comments=4,
-                    ),
-                ]
-            }
-        }
+        return {"data": {"items": [
+            make_note_item("synthetic-author-note", "合成示例：内部工单助手开发需求",
+                           SYNTHETIC_AUTHOR_BODY, "合成作者甲", comments=0),
+            make_note_item("synthetic-comment-note", "合成示例：杭州工单助手方案讨论",
+                           "合成场景：介绍工单系统的接口设计，供示例用户讨论。", "合成作者乙", comments=4),
+        ]}}
 
     def read_note(self, note_id: str) -> dict[str, Any]:
-        items = self.search("detail")["data"]["items"]
+        items = self.search("synthetic-detail")["data"]["items"]
         return {"data": {"items": [item for item in items if item["id"] == note_id]}}
 
     def comments(self, note_id: str, cursor: str = "") -> dict[str, Any]:
-        if note_id != "n-comment":
+        if note_id != "synthetic-comment-note":
             return {"data": {"comments": [], "has_more": False, "cursor": ""}}
         if not cursor:
-            return {
-                "data": {
-                    "comments": [
-                        {"id": "c-gd", "content": "可以接入企业微信回复客户消息吗？", "user_info": {"nickname": "广东用户", "user_id": "u-gd"}, "ip_location": "广东"},
-                        {"id": "c-jx", "content": "有性价比很高的AI客服推荐吗？预算少", "user_info": {"nickname": "江西用户", "user_id": "u-jx"}, "ip_location": "江西"},
-                    ],
-                    "has_more": True,
-                    "cursor": "page2",
-                }
-            }
-        return {
-            "data": {
-                "comments": [
-                    {"id": "c-ignore", "content": "求资料学习一下", "user_info": {"nickname": "学习用户", "user_id": "u-ignore"}, "ip_location": "广东"},
-                    {"id": "c-extra", "content": "超过上限不应被采集", "user_info": {"nickname": "多余用户", "user_id": "u-extra"}, "ip_location": "广东"},
-                ],
-                "has_more": False,
-                "cursor": "",
-            }
-        }
+            return {"data": {"comments": [
+                {"id": "synthetic-local", "content": SYNTHETIC_LOCAL_QUESTION,
+                 "user_info": {"nickname": "合成评论者甲", "user_id": "synthetic-user-local"}, "ip_location": "浙江"},
+                {"id": "synthetic-remote", "content": SYNTHETIC_REMOTE_QUESTION,
+                 "user_info": {"nickname": "合成评论者乙", "user_id": "synthetic-user-remote"}, "ip_location": "青海"},
+            ], "has_more": True, "cursor": "synthetic-page-two"}}
+        return {"data": {"comments": [
+            {"id": "synthetic-ignore", "content": SYNTHETIC_STUDY_COMMENT,
+             "user_info": {"nickname": "合成评论者丙", "user_id": "synthetic-user-study"}, "ip_location": "浙江"},
+            {"id": "synthetic-extra", "content": "合成场景：这条用于验证评论采集数量边界。",
+             "user_info": {"nickname": "合成评论者丁", "user_id": "synthetic-user-extra"}, "ip_location": "浙江"},
+        ], "has_more": False, "cursor": ""}}
 
 
-class Task3RegressionRunner(FakeRunner):
+class SyntheticRegionalRunner(FakeRunner):
     def _output(self, agent_key: str, payload: dict[str, Any]) -> dict[str, Any]:
-        base = {
-            "decision": "ok",
-            "confidence": 0.9,
-            "evidence": ["fixture evidence"],
-            "risks": [],
-            "next_actions": [],
-        }
+        base = {"decision": "ok", "confidence": 0.9, "evidence": ["synthetic fixture evidence"],
+                "risks": [], "next_actions": []}
         if agent_key == "chief_orchestrator":
             return {**base, "review_policy": {"low_confidence_threshold": 0.6, "high_value_priority": "A", "max_reviews": 8}}
         if agent_key == "planning_agent":
-            return {
-                **base,
-                "strategy_summary": "找深圳AI客服私有化和企业微信接入线索",
-                "target_customer_profile": "深圳企业客服负责人",
-                "geo_constraints": {"target_city": "深圳", "target_province": "广东"},
-                "exclusions": ["学习资料"],
-                "keywords": ["深圳 AI客服 报价"],
-                "hypotheses": [{"keyword": "深圳 AI客服 报价", "intent": "报价和落地咨询", "expected_signals": ["预算", "接入"]}],
-            }
+            return {**base, "strategy_summary": "合成场景：查找工单助手开发需求。",
+                    "target_customer_profile": "合成工单系统负责人",
+                    "geo_constraints": {"target_city": "杭州", "target_province": "浙江"},
+                    "exclusions": ["课程示例"], "keywords": ["杭州 工单助手"],
+                    "hypotheses": [{"keyword": "杭州 工单助手", "intent": "合成需求讨论", "expected_signals": ["开发", "预算"]}]}
         if agent_key == "relevance_agent":
             if payload.get("reviewMode") == "missing_batch":
-                return {**base, "notes": [{"note_id": note["note_id"], "decision": "keep", "confidence": 0.82, "evidence": ["补齐保留"], "reason": "补齐后仍相关"} for note in payload.get("notes") or []]}
-            return {**base, "notes": [{"note_id": "n-author", "decision": "keep", "confidence": 0.95, "evidence": ["20W预算私有化部署"], "reason": "作者本人有明确预算和部署需求"}]}
+                return {**base, "notes": [{"note_id": note["note_id"], "decision": "keep", "confidence": 0.82,
+                        "evidence": ["合成内容补齐检查"], "reason": "合成示例与确认主题相符。"}
+                        for note in payload.get("notes") or []]}
+            return {**base, "notes": [{"note_id": "synthetic-author-note", "decision": "keep", "confidence": 0.95,
+                    "evidence": [SYNTHETIC_AUTHOR_BODY], "reason": "合成作者提出了工单助手开发要求。"}]}
         if agent_key == "lead_signal_agent":
             if payload.get("reviewMode") == "missing_batch":
-                return {
-                    **base,
-                    "leads": [
-                        {
-                            "candidate_id": item["candidate_id"],
-                            "lead_type": item.get("lead_type", "comment_lead"),
-                            "comment_id": item.get("comment_id"),
-                            "note_id": item.get("note_id"),
-                            "decision": "ignore",
-                            "score": 5,
-                            "priority": "D",
-                            "stage": "无需求",
-                            "confidence": 0.86,
-                            "evidence": item.get("content", ""),
-                            "demand_summary": "",
-                            "reason": "只是求资料学习，没有采购、预算或落地咨询。",
-                            "risk": "",
-                        }
-                        for item in payload.get("leadCandidates") or []
-                    ],
-                }
-            return {
-                **base,
-                "leads": [
-                    {
-                        "candidate_id": "note:n-author",
-                        "lead_type": "note_author",
-                        "comment_id": "",
-                        "note_id": "n-author",
-                        "decision": "lead",
-                        "score": 95,
-                        "priority": "A",
-                        "stage": "预算调研阶段",
-                        "confidence": 0.95,
-                        "evidence": "20w预算，想找人部署多语言AI客服，本地化部署",
-                        "demand_summary": "外贸团队有20W预算，寻找AI客服私有化部署方案。",
-                        "reason": "预算、场景和部署方式明确。",
-                        "risk": "需确认地域。",
-                    },
-                    {
-                        "candidate_id": "c-gd",
-                        "lead_type": "comment_lead",
-                        "comment_id": "c-gd",
-                        "note_id": "n-comment",
-                        "decision": "lead",
-                        "score": 80,
-                        "priority": "B",
-                        "stage": "方案咨询阶段",
-                        "confidence": 0.82,
-                        "evidence": "可以接入企业微信回复客户消息吗？",
-                        "demand_summary": "广东用户咨询AI客服接入企业微信。",
-                        "reason": "明确接入场景。",
-                        "risk": "",
-                    },
-                    {
-                        "candidate_id": "c-jx",
-                        "lead_type": "comment_lead",
-                        "comment_id": "c-jx",
-                        "note_id": "n-comment",
-                        "decision": "lead",
-                        "score": 85,
-                        "priority": "B",
-                        "stage": "工具选型阶段",
-                        "confidence": 0.8,
-                        "evidence": "有性价比很高的AI客服推荐吗？预算少",
-                        "demand_summary": "江西用户寻找低预算AI客服。",
-                        "reason": "有预算和工具选型意图。",
-                        "risk": "",
-                    },
-                ],
-            }
-        if agent_key == "product_strategy_agent":
-            if payload.get("reviewMode") == "missing_batch":
-                return {
-                    **base,
-                    "lead_updates": [
-                        {
-                            "lead_id": lead["lead_id"],
-                            "recommended_products": "大模型私有化部署",
-                            "matched_products": ["大模型私有化部署"],
-                            "demand_summary": lead.get("demand_summary"),
-                            "outreach_copy": "看到你在笔记中提到20W预算和AI客服私有化部署，可以先帮你梳理部署边界。",
-                            "reason": "作者级预算和私有化部署需求明确。",
-                        }
-                        for lead in payload.get("leads") or []
-                    ],
-                    "productDistribution": [],
-                }
-            return {
-                **base,
-                "lead_updates": [
-                    {
-                        "lead_id": "n-comment:c-gd",
-                        "recommended_products": "AI 应用开发",
-                        "matched_products": ["AI 应用开发"],
-                        "demand_summary": "广东用户咨询企业微信AI客服接入。",
-                        "outreach_copy": "看到你在咨询企业微信接入AI客服，可以给你一些接口方案参考。",
-                        "reason": "企业微信接口接入属于AI应用开发。",
-                    }
-                ],
-                "productDistribution": [],
-            }
+                return {**base, "leads": [{
+                    "candidate_id": item["candidate_id"], "lead_type": item.get("lead_type", "comment_lead"),
+                    "comment_id": item.get("comment_id"), "note_id": item.get("note_id"),
+                    "decision": "ignore", "score": 5, "priority": "D", "stage": "无需求", "confidence": 0.86,
+                    "evidence": item.get("content", ""), "demand_summary": "",
+                    "reason": "合成评论明确仅学习示例，没有采购或开发需求。", "risk": "",
+                } for item in payload.get("leadCandidates") or []]}
+            return {**base, "leads": [
+                {"candidate_id": "note:synthetic-author-note", "lead_type": "note_author", "comment_id": "",
+                 "note_id": "synthetic-author-note", "decision": "lead", "score": 95, "priority": "A",
+                 "stage": "预算调研阶段", "confidence": 0.95, "evidence": SYNTHETIC_AUTHOR_BODY,
+                 "demand_summary": "合成作者希望委托开发内部工单助手。",
+                 "reason": "合成原文包含预算和开发目标。", "risk": "合成示例的实施范围仍待确认。"},
+                {"candidate_id": "synthetic-local", "lead_type": "comment_lead", "comment_id": "synthetic-local",
+                 "note_id": "synthetic-comment-note", "decision": "lead", "score": 80, "priority": "B",
+                 "stage": "方案咨询阶段", "confidence": 0.82, "evidence": SYNTHETIC_LOCAL_QUESTION,
+                 "demand_summary": "合成评论者甲咨询工单自动分派开发。", "reason": "合成原文有明确模块需求。", "risk": ""},
+                {"candidate_id": "synthetic-remote", "lead_type": "comment_lead", "comment_id": "synthetic-remote",
+                 "note_id": "synthetic-comment-note", "decision": "lead", "score": 85, "priority": "B",
+                 "stage": "工具选型阶段", "confidence": 0.8, "evidence": SYNTHETIC_REMOTE_QUESTION,
+                 "demand_summary": "合成评论者乙寻找入门工单助手。", "reason": "合成原文表达工具选型和预算要求。", "risk": ""},
+            ]}
         if agent_key == "critic_qa_agent":
-            return {**base, "approved": True, "issues": [], "review_requests": []}
+            return {**base, "approved": True, "issues": [], "review_requests": [],
+                    "reviews": [{"target_id": lead["lead_id"], "status": "approved", "reason": "合成原文支持该判断。"}
+                                for lead in payload["leads"]]}
         if agent_key == "report_agent":
-            return {**base, "summary": "识别到作者级和广东评论线索。", "insights": [], "recommended_actions": [], "productDistribution": []}
+            return {**base, "summary": "合成场景包含作者需求、不同省份的评论需求及一条学习评论。",
+                    "insights": [], "recommended_actions": [], "productDistribution": []}
         if agent_key == "reflection_evolution_agent":
-            return {**base, "task_summary": "ok", "agent_summaries": [], "eval_cases": [], "prompt_improvements": [], "evolution_summary": "ok"}
+            return {**base, "task_summary": "合成场景检查完成。", "agent_summaries": [], "eval_cases": [],
+                    "prompt_improvements": [], "evolution_summary": "合成场景无需调整。"}
         return base
 
 
@@ -463,7 +369,7 @@ class AgentHarnessTests(unittest.TestCase):
     def test_extract_json_text_accepts_markdown_fence(self) -> None:
         self.assertEqual(extract_json_text("```json\n{\"ok\": true}\n```"), "{\"ok\": true}")
 
-    def test_default_user_redaction_is_disabled(self) -> None:
+    def test_default_keeps_business_account_details_visible(self) -> None:
         self.assertFalse(DEFAULT_CONFIG["sales"]["redact_user"])
 
     def test_sqlite_storage_writes_audit_decisions(self) -> None:
@@ -589,7 +495,7 @@ class AgentHarnessTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 FeedbackLearningService({"llm": {"api_key": ""}}, storage).analyze(feedback_id)
 
-    def test_feedback_apply_promotes_runtime_prompt(self) -> None:
+    def test_feedback_apply_saves_unpromoted_candidate(self) -> None:
         storage = self.make_storage()
         registry = PromptRegistry(storage)
         registry.ensure_defaults()
@@ -640,10 +546,12 @@ class AgentHarnessTests(unittest.TestCase):
         self.assertEqual(analyzed["status"], "analyzed")
         result = service.apply(feedback_id)
         self.assertEqual(result["feedback"]["status"], "applied")
-        self.assertEqual(storage.get_active_prompt("lead_signal_agent")["id"], result["feedback"]["candidatePromptId"])
-        self.assertIn("怎么联系、怎么卖", storage.get_active_prompt("lead_signal_agent")["prompt"])
+        self.assertFalse(result["promoted"])
+        self.assertNotEqual(storage.get_active_prompt("lead_signal_agent")["id"], result["candidatePromptId"])
+        candidate = next(item for item in storage.list_prompt_versions("lead_signal_agent") if item["id"] == result["candidatePromptId"])
+        self.assertIn("怎么联系、怎么卖", candidate["prompt"])
 
-    def test_evaluator_auto_promotes_good_candidate(self) -> None:
+    def test_evaluator_expected_gain_cannot_auto_promote(self) -> None:
         storage = self.make_storage()
         registry = PromptRegistry(storage)
         registry.ensure_defaults()
@@ -678,133 +586,71 @@ class AgentHarnessTests(unittest.TestCase):
             expected_gain=0.06,
             has_safety_risk=False,
         )
-        self.assertTrue(result["promoted"])
-        self.assertEqual(storage.get_active_prompt("lead_signal_agent")["id"], candidate_id)
+        self.assertFalse(result["promoted"])
+        self.assertNotEqual(storage.get_active_prompt("lead_signal_agent")["id"], candidate_id)
 
-    def test_harness_pipeline_runs_with_fake_agents(self) -> None:
+    def test_harness_pipeline_runs_only_confirmed_plan_with_fake_agents(self) -> None:
         storage = self.make_storage()
-        task_id = storage.create_task({"keyword": "腾讯云", "delayMin": 0, "delayMax": 0}, mode="single")
-        config = {
-            "llm": {"api_key": "test-key", "api_base": "http://fake/v1", "model": "fake-model", "temperature": 0.0},
-            "xhs": {"max_count": 20, "read_delay_min": 0, "read_delay_max": 0},
-            "sales": {"default_min_score": 60, "default_business_direction": "cloud_ai", "redact_user": False},
-        }
+        task_id = storage.create_task({"keyword": "腾讯云"})
         runner = FakeRunner(storage, task_id)
-        pipeline = HarnessPipeline(FakeAdapter(), config, storage, runner=runner)
-        result = pipeline.run(
-            {"demandDescription": "寻找企业腾讯云续费降本和优惠报价需求", "keyword": "腾讯云", "count": 1, "delayMin": 0, "delayMax": 0},
-            task_id=task_id,
-            event_callback=lambda *args, **kwargs: None,
-            progress_callback=lambda *args, **kwargs: None,
-        )
-        self.assertEqual(result["harness"]["mode"], "multi-agent-llm")
-        self.assertEqual(result["demandDescription"], "寻找企业腾讯云续费降本和优惠报价需求")
-        self.assertEqual(result["leads"]["leadsCount"], 1)
-        self.assertEqual(runner.payloads["chief_orchestrator"][0]["demandDescription"], "寻找企业腾讯云续费降本和优惠报价需求")
-        self.assertEqual(runner.payloads["planning_agent"][0]["demandDescription"], "寻找企业腾讯云续费降本和优惠报价需求")
-        self.assertGreaterEqual(len(storage.list_agent_runs(task_id)), 7)
-        self.assertTrue(result["taskSummary"].get("task_summary"))
-        self.assertTrue(result["evolutionSummary"])
+        plan = normalize_plan({"seedKeywords": ["腾讯云"], "keywords": ["腾讯云"],
+            "searchGoal": "寻找企业腾讯云续费降本和优惠报价需求", "maxNotes": 2, "delayMin": 0, "delayMax": 0})
+        result = HarnessPipeline(FakeAdapter(), {}, storage, runner=runner).run({"confirmedPlan": plan}, task_id=task_id)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["demandDescription"], plan["searchGoal"])
+        self.assertEqual(result["leads"]["qualifiedCount"], 1)
+        self.assertNotIn("chief_orchestrator", runner.calls)
+        self.assertNotIn("planning_agent", runner.calls)
+        self.assertNotIn("product_strategy_agent", runner.calls)
+        self.assertNotIn("reflection_evolution_agent", runner.calls)
+        self.assertTrue(result["taskSummary"]["task_summary"])
+        qualified = next(item for item in result["leads"]["leads"] if item["qualified"])
+        self.assertTrue(qualified["evidenceComplete"])
+        self.assertEqual(qualified["sourceRefs"][0]["commentId"], "c1")
         audit = storage.list_audit_decisions(task_id, limit=300)
-        decisions = {(item["stage"], item["entityType"], item["entityId"], item["decision"]) for item in audit["items"]}
-        stages = {item["stage"] for item in audit["items"]}
-        for stage in {"orchestrate", "plan", "read_detail", "comments", "product_strategy", "qa", "report", "reflection"}:
-            self.assertIn(stage, stages)
-        self.assertIn(("orchestrate", "agent", "chief_orchestrator", "completed"), decisions)
-        self.assertIn(("plan", "agent", "planning_agent", "completed"), decisions)
-        self.assertIn(("qa", "agent", "critic_qa_agent", "approved"), decisions)
-        self.assertIn(("report", "agent", "report_agent", "generated"), decisions)
-        self.assertIn(("reflection", "agent", "reflection_evolution_agent", "completed"), decisions)
-        self.assertIn(("search", "keyword", "腾讯云优惠", "planned"), decisions)
+        decisions = {(item["stage"], item["decision"]) for item in audit["items"]}
+        self.assertIn(("plan", "confirmed"), decisions)
+        self.assertIn(("lead_signal", "ignore"), decisions)
+        self.assertIn(("report", "completed"), decisions)
+        self.assertGreaterEqual(len(storage.list_agent_runs(task_id)), 4)
 
-    def test_balanced_candidate_pool_keeps_each_enabled_platform(self) -> None:
-        pipeline = HarnessPipeline(FakeAdapter(), {"llm": {"api_key": "test-key"}})
-        notes = [
-            {"id": f"x{i}", "platform": "xhs", "engagement": 1000 - i}
-            for i in range(6)
-        ] + [
-            {"id": "d1", "platform": "douyin", "engagement": 0},
-            {"id": "d2", "platform": "douyin", "engagement": 0},
-        ]
-        selected = pipeline._balanced_candidate_pool(
-            notes,
-            {"platforms": ["xhs", "douyin"], "metric": "engagement"},
-            4,
-        )
-        self.assertEqual(len(selected), 4)
-        self.assertIn("douyin", {item["platform"] for item in selected})
 
-    def test_business_direction_and_bridge_policy_reach_agents(self) -> None:
+    def test_legacy_business_direction_cannot_influence_neutral_plan(self) -> None:
         storage = self.make_storage()
-        task_id = storage.create_task({"demandDescription": "找需要AI培训的线索"}, mode="single")
-        config = {
-            "llm": {"api_key": "test-key", "api_base": "http://fake/v1", "model": "fake-model", "temperature": 0.0},
-            "xhs": {"max_count": 20, "read_delay_min": 0, "read_delay_max": 0},
-            "sales": {"default_min_score": 60, "default_business_direction": "ai_training_bridge", "redact_user": False},
-        }
+        task_id = storage.create_task({"keyword": "腾讯云"})
         runner = FakeRunner(storage, task_id)
+        config = {"sales": {"default_business_direction": "ai_training_bridge"}}
+        plan = normalize_plan({"seedKeywords": ["腾讯云"], "delayMin": 0, "delayMax": 0})
         result = HarnessPipeline(FakeAdapter(), config, storage, runner=runner).run(
-            {"demandDescription": "找需要AI培训的线索", "count": 1, "delayMin": 0, "delayMax": 0},
-            task_id=task_id,
-            event_callback=lambda *args, **kwargs: None,
-            progress_callback=lambda *args, **kwargs: None,
-        )
-        self.assertEqual(result["businessDirection"], "ai_training_bridge")
-        chief_payload = runner.payloads["chief_orchestrator"][0]
-        lead_payload = runner.payloads["lead_signal_agent"][0]
-        self.assertEqual(chief_payload["businessDirection"], "ai_training_bridge")
-        self.assertEqual(lead_payload["strategy"]["bridgePolicy"]["mode"], "ai_training_bridge")
+            {"confirmedPlan": plan, "businessDirection": "ai_training_bridge"}, task_id=task_id)
+        self.assertNotIn("businessDirection", result)
+        model_payload = json.dumps(runner.payloads, ensure_ascii=False)
+        self.assertNotIn("ai_training_bridge", model_payload)
+        self.assertNotIn("availableProducts", model_payload)
+        self.assertNotIn("product_strategy_agent", runner.calls)
 
-    def test_task3_regressions_are_handled_in_pipeline(self) -> None:
+    def test_synthetic_regions_keep_evidence_and_audit_negative_decisions(self) -> None:
         storage = self.make_storage()
-        payload = {
-            "demandDescription": "找深圳正在做AI客服私有化、想降低客服人力成本、或在评论里询问落地方案的潜在线索",
-            "count": 2,
-            "minScore": 60,
-            "delayMin": 0,
-            "delayMax": 0,
-        }
-        task_id = storage.create_task(payload, mode="single")
-        config = {
-            "llm": {"api_key": "test-key", "api_base": "http://fake/v1", "model": "fake-model", "temperature": 0.0},
-            "xhs": {"max_count": 20, "read_delay_min": 0, "read_delay_max": 0, "max_comments_per_note": 3},
-            "sales": {"default_min_score": 60, "default_business_direction": "cloud_ai", "redact_user": False},
-        }
-        runner = Task3RegressionRunner(storage, task_id)
-        result = HarnessPipeline(Task3RegressionAdapter(), config, storage, runner=runner).run(
-            payload,
-            task_id=task_id,
-            event_callback=lambda *args, **kwargs: None,
-            progress_callback=lambda *args, **kwargs: None,
-        )
-
-        leads = result["leads"]["leads"]
-        lead_ids = {lead["lead_id"] for lead in leads}
+        plan = normalize_plan({"seedKeywords": ["杭州 工单助手"], "searchGoal": "合成场景：查找杭州的工单助手需求",
+            "maxNotes": 2, "maxCommentsPerNote": 3, "maxCommentsTotal": 3, "delayMin": 0, "delayMax": 0})
+        task_id = storage.create_task({"confirmedPlan": plan})
+        runner = SyntheticRegionalRunner(storage, task_id)
+        result = HarnessPipeline(SyntheticRegionalAdapter(), {}, storage, runner=runner).run({"confirmedPlan": plan}, task_id=task_id)
+        self.assertEqual(result["status"], "completed")
+        leads = {lead["lead_id"]: lead for lead in result["leads"]["leads"]}
         self.assertEqual(result["leads"]["totalCommentsScanned"], 3)
-        self.assertIn("note:n-author", lead_ids)
-        self.assertIn("n-comment:c-gd", lead_ids)
-        self.assertNotIn("n-comment:c-jx", lead_ids)
+        self.assertTrue(leads["note:synthetic-author-note"]["qualified"])
+        self.assertTrue(leads["synthetic-comment-note:synthetic-local"]["qualified"])
+        self.assertTrue(leads["synthetic-comment-note:synthetic-remote"]["qualified"])
+        self.assertEqual(leads["synthetic-comment-note:synthetic-remote"]["ip"], "青海")
+        self.assertTrue(leads["synthetic-comment-note:synthetic-remote"]["evidenceComplete"])
+        self.assertNotIn("recommended_products", leads["note:synthetic-author-note"])
+        self.assertFalse(leads["synthetic-comment-note:synthetic-ignore"]["qualified"])
+        items = storage.list_audit_decisions(task_id, limit=300)["items"]
+        self.assertFalse([x for x in items if x["stage"] == "relevance" and x["decision"] == "missing_decision"])
+        self.assertTrue([x for x in items if x["stage"] == "lead_signal" and x["entityId"] == "xhs:synthetic-comment-note:synthetic-ignore" and x["decision"] == "ignore"])
+        self.assertFalse([x for x in items if x["stage"] == "product_strategy"])
 
-        author = next(lead for lead in leads if lead["lead_id"] == "note:n-author")
-        self.assertEqual(author["lead_type"], "note_author")
-        self.assertEqual(author["geo_status"], "unknown")
-        self.assertEqual(author["recommended_products"], "大模型私有化部署")
-
-        gd = next(lead for lead in leads if lead["lead_id"] == "n-comment:c-gd")
-        self.assertEqual(gd["geo_status"], "needs_city_confirmation")
-        self.assertIn("深圳", gd["geo_reason"])
-
-        audit = storage.list_audit_decisions(task_id, limit=300)
-        items = audit["items"]
-        self.assertFalse([item for item in items if item["stage"] == "relevance" and item["decision"] == "missing_decision"])
-        self.assertTrue([item for item in items if item["stage"] == "lead_signal" and item["entityId"] == "c-ignore" and item["decision"] == "ignore" and "求资料" in item["reason"]])
-        self.assertTrue([item for item in items if item["stage"] == "lead_signal" and item["entityId"] == "c-jx" and item["decision"] == "below_threshold" and "江西" in item["reason"]])
-        product_audits = [item for item in items if item["stage"] == "product_strategy" and item["entityType"] == "lead"]
-        self.assertEqual({item["entityId"] for item in product_audits}, {"note:n-author", "n-comment:c-gd"})
-        self.assertTrue(all(item["decision"] == "updated" for item in product_audits))
-        self.assertTrue([item for item in items if item["stage"] == "qa" and item["entityType"] == "agent" and item["decision"] == "approved"])
-        self.assertTrue([item for item in items if item["stage"] == "report" and item["entityType"] == "agent" and item["decision"] == "generated"])
-        self.assertTrue([item for item in items if item["stage"] == "reflection" and item["entityType"] == "agent" and item["decision"] == "completed"])
 
 
 if __name__ == "__main__":

@@ -1,37 +1,21 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import platform
 import shutil
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from xhs_login_helper import cdp_ready, chrome_executable, find_free_port
+from source_normalization import to_int
+from browser_session import BrowserSession, cdp_ready
 
 
 DOUYIN_LOGIN_URL = "https://www.douyin.com/"
 DOUYIN_REQUIRED_COOKIE_HINTS = ("sessionid", "sid_guard", "passport_csrf_token")
-
-
-def to_int(value: Any) -> int:
-    if value is None:
-        return 0
-    text = str(value).replace(",", "").strip()
-    if text.endswith("万"):
-        try:
-            return int(float(text[:-1]) * 10000)
-        except ValueError:
-            return 0
-    try:
-        return int(float(text))
-    except ValueError:
-        return 0
 
 
 def first_text(*values: Any) -> str:
@@ -40,15 +24,6 @@ def first_text(*values: Any) -> str:
         if text:
             return text
     return ""
-
-
-def nested(source: dict[str, Any], *keys: str) -> Any:
-    current: Any = source
-    for key in keys:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(key)
-    return current
 
 
 def first_list(value: Any, keys: tuple[str, ...]) -> list[Any]:
@@ -167,8 +142,6 @@ def normalized_douyin_comment(item: dict[str, Any], aweme_id: str) -> dict[str, 
     content = first_text(item.get("text"), item.get("content"), item.get("comment_text"), item.get("desc"))
     if not raw_comment_id and not content:
         return None
-    if not raw_comment_id:
-        raw_comment_id = hashlib.sha1(f"douyin:{aweme_id}:{content}".encode("utf-8")).hexdigest()[:16]
     sec_user_id = first_text(
         user.get("sec_uid"),
         user.get("sec_user_id"),
@@ -178,7 +151,9 @@ def normalized_douyin_comment(item: dict[str, Any], aweme_id: str) -> dict[str, 
     )
     return {
         "platform": "douyin",
-        "id": f"douyin:{raw_comment_id}",
+        "id": f"douyin:{raw_comment_id}" if raw_comment_id else "",
+        "source_comment_id": f"douyin:{raw_comment_id}" if raw_comment_id else "",
+        "id_is_synthetic": not bool(raw_comment_id),
         "raw_comment_id": raw_comment_id,
         "aweme_id": aweme_id,
         "content": content,
@@ -270,6 +245,8 @@ class DouyinReadAdapter:
         return text
 
     def search(self, keyword: str, page: int = 1) -> dict[str, Any]:
+        if isinstance(page, bool) or not isinstance(page, int) or page != 1:
+            raise ValueError("抖音读取接口尚未支持分页，不能将后续页视为已采集；请将每个关键词页数设为 1。")
         data = self.run(["douyin-search", "--keyword", keyword], timeout=90)
         items = first_list(data, ("items", "works", "aweme_list", "awemeList", "list", "data_list", "videos"))
         normalized = [post for idx, item in enumerate(items, 1) if isinstance(item, dict) for post in [normalized_douyin_post(item, idx)] if post]
@@ -301,43 +278,22 @@ class DouyinReadAdapter:
         return {"data": {"comments": normalized, "cursor": next_token, "has_more": has_more, "raw": data}}
 
 
-class DouyinLoginHelper:
+class DouyinLoginHelper(BrowserSession):
     def __init__(self, root: Path, home_dir: Path | None = None) -> None:
         self.root = root
         self.home_dir = home_dir or root / "data" / "douyin-default-profile"
-        self.profile_dir = self.home_dir / "chrome-profile"
-        self.port: int | None = None
-        self.process: subprocess.Popen[Any] | None = None
-        self.lock = threading.Lock()
+        super().__init__(self.home_dir / "chrome-profile", (9330, 9429))
         self.mode = "idle"
 
     def start(self, mode: str | None = None) -> dict[str, Any]:
         return self._start_browser()
 
     def _start_browser(self) -> dict[str, Any]:
-        if self.port and cdp_ready(self.port):
+        with self.lock:
+            self.mode = "idle"
+            self.start_browser(DOUYIN_LOGIN_URL)
             self.mode = "browser"
-            self._open_url_in_chrome()
             return self._session_payload("running", "抖音登录/验证窗口已打开，请在 Chrome 中完成操作。")
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
-        self.port = find_free_port(9330, 9429)
-        args = [
-            str(chrome_executable()),
-            f"--remote-debugging-port={self.port}",
-            "--remote-debugging-address=127.0.0.1",
-            f"--user-data-dir={self.profile_dir}",
-            "--new-window",
-            "--no-first-run",
-            "--disable-default-apps",
-            DOUYIN_LOGIN_URL,
-        ]
-        self.process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(30):
-            if cdp_ready(self.port):
-                self.mode = "browser"
-                return self._session_payload("running", "已打开抖音登录/验证窗口。")
-            time.sleep(0.5)
-        raise RuntimeError("Chrome 登录窗口已尝试启动，但调试端口未就绪。请关闭窗口后重试。")
 
     def status(self) -> dict[str, Any]:
         if not self.port:
@@ -357,17 +313,7 @@ class DouyinLoginHelper:
         removed: list[str] = []
         remaining: list[str] = []
         with self.lock:
-            if self.process and self.process.poll() is None:
-                try:
-                    self.process.terminate()
-                    self.process.wait(timeout=5)
-                except Exception:
-                    try:
-                        self.process.kill()
-                    except Exception:
-                        pass
-            self.process = None
-            self.port = None
+            self.stop_browser()
             self.mode = "idle"
             if self.profile_dir.exists():
                 shutil.rmtree(self.profile_dir, ignore_errors=True)
@@ -385,12 +331,6 @@ class DouyinLoginHelper:
             "remaining": remaining,
             "homeDir": str(self.home_dir),
         }
-
-    def _open_url_in_chrome(self) -> None:
-        try:
-            subprocess.Popen([str(chrome_executable()), DOUYIN_LOGIN_URL], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
 
     def _session_payload(self, status: str, message: str) -> dict[str, Any]:
         return {
@@ -483,165 +423,23 @@ except Exception as exc:
 """
 
 
+
 class DouyinBrowserActionAdapter:
+    """Platform binding for the verified browser action contract."""
     platform = "douyin"
 
     def __init__(self, helper: DouyinLoginHelper) -> None:
         self.helper = helper
+        from xhs_browser_actions import XhsBrowserActionAdapter
+        self._browser = XhsBrowserActionAdapter(helper, platform="douyin")
 
     def ensure_authenticated(self) -> None:
         data = self.helper.confirm()
         if not data.get("ok"):
             raise RuntimeError(data.get("message") or data.get("error") or "尚未确认抖音登录态。")
 
-    def follow_user(self, user_id: str, profile_url: str = "") -> dict[str, Any]:
-        self.ensure_authenticated()
-        target = self.profile_url(user_id, profile_url)
-        data = self.helper._run_script(self._follow_script(), [target], timeout=75)
-        if not data.get("ok"):
-            raise RuntimeError(data.get("message") or data.get("error") or "抖音关注失败。")
-        return data
+    def account_identity(self) -> dict[str, str]:
+        return self._browser.account_identity()
 
-    def send_dm(self, user_id: str, message: str, profile_url: str = "") -> dict[str, Any]:
-        self.ensure_authenticated()
-        text = str(message or "").strip()
-        if not text:
-            raise RuntimeError("私信内容不能为空。")
-        target = self.profile_url(user_id, profile_url)
-        data = self.helper._run_script(self._dm_script(), [target, text], timeout=90)
-        if not data.get("ok"):
-            raise RuntimeError(data.get("message") or data.get("error") or "抖音私信发送失败。")
-        return data
-
-    def profile_url(self, user_id: str, profile_url: str = "") -> str:
-        if profile_url:
-            return profile_url
-        target = str(user_id or "").strip()
-        if not target:
-            raise RuntimeError("缺少可触达的抖音用户 ID。")
-        if target.startswith("http://") or target.startswith("https://"):
-            return target
-        return f"https://www.douyin.com/user/{target}"
-
-    def _follow_script(self) -> str:
-        return """
-import json
-import sys
-from playwright.sync_api import sync_playwright
-port = int(sys.argv[1])
-target = sys.argv[2]
-try:
-    with sync_playwright() as p:
-        browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
-        context = browser.contexts[0]
-        page = context.pages[0] if context.pages else context.new_page()
-        page.goto(target, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(2000)
-        body = page.locator("body").inner_text(timeout=5000)
-        if "登录" in body and not any(k in body for k in ["私信", "消息", "已关注", "关注"]):
-            raise RuntimeError("抖音页面提示未登录，请先完成网页登录/验证。")
-        if any(k in body for k in ["已关注", "互相关注"]):
-            print(json.dumps({"ok": True, "already_followed": True, "url": page.url, "message": "目标已关注。"}, ensure_ascii=False))
-            raise SystemExit(0)
-        locators = [
-            page.get_by_role("button", name="关注"),
-            page.locator("button:has-text('关注')"),
-            page.locator("text=关注"),
-        ]
-        clicked = False
-        for locator in locators:
-            try:
-                if locator.count() > 0:
-                    locator.first.click(timeout=5000)
-                    clicked = True
-                    break
-            except Exception:
-                pass
-        if not clicked:
-            raise RuntimeError("未找到抖音关注按钮，可能页面结构变化、已被风控或目标主页不可触达。")
-        page.wait_for_timeout(1500)
-        print(json.dumps({"ok": True, "already_followed": False, "url": page.url, "message": "已尝试关注目标用户。"}, ensure_ascii=False))
-except Exception as exc:
-    print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}", "message": str(exc)}, ensure_ascii=False))
-"""
-
-    def _dm_script(self) -> str:
-        return """
-import json
-import sys
-from playwright.sync_api import sync_playwright
-port = int(sys.argv[1])
-target = sys.argv[2]
-message = sys.argv[3]
-try:
-    with sync_playwright() as p:
-        browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
-        context = browser.contexts[0]
-        page = context.pages[0] if context.pages else context.new_page()
-        page.goto(target, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(2000)
-        body = page.locator("body").inner_text(timeout=5000)
-        if "登录" in body and "私信" not in body:
-            raise RuntimeError("抖音页面提示未登录，请先完成网页登录/验证。")
-        dm_buttons = [
-            page.get_by_role("button", name="私信"),
-            page.locator("button:has-text('私信')"),
-            page.locator("text=私信"),
-            page.locator("button:has-text('发私信')"),
-        ]
-        opened = False
-        for locator in dm_buttons:
-            try:
-                if locator.count() > 0:
-                    locator.first.click(timeout=5000)
-                    opened = True
-                    break
-            except Exception:
-                pass
-        if not opened:
-            raise RuntimeError("未找到抖音私信入口，可能未互关、目标关闭私信、账号无权限或页面结构变化。")
-        page.wait_for_timeout(1500)
-        editors = [
-            page.locator("textarea"),
-            page.locator("[contenteditable='true']"),
-            page.locator("div[role='textbox']"),
-        ]
-        filled = False
-        for editor in editors:
-            try:
-                if editor.count() > 0:
-                    editor.first.fill(message, timeout=5000)
-                    filled = True
-                    break
-            except Exception:
-                try:
-                    editor.first.click(timeout=2000)
-                    page.keyboard.type(message)
-                    filled = True
-                    break
-                except Exception:
-                    pass
-        if not filled:
-            raise RuntimeError("未找到抖音私信输入框。")
-        send_buttons = [
-            page.get_by_role("button", name="发送"),
-            page.locator("button:has-text('发送')"),
-            page.locator("text=发送"),
-        ]
-        sent = False
-        for locator in send_buttons:
-            try:
-                if locator.count() > 0:
-                    locator.first.click(timeout=5000)
-                    sent = True
-                    break
-            except Exception:
-                pass
-        if not sent:
-            page.keyboard.press("Enter")
-            sent = True
-        page.wait_for_timeout(1200)
-        print(json.dumps({"ok": True, "url": page.url, "message": "已尝试发送抖音私信。"}, ensure_ascii=False))
-except Exception as exc:
-    print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}", "message": str(exc)}, ensure_ascii=False))
-"""
+    def execute(self, action: dict[str, Any]) -> dict[str, Any]:
+        return self._browser.execute(action)

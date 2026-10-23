@@ -4,16 +4,19 @@ from contextlib import contextmanager
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Iterator
 
+from json_utils import parse_json
+
 
 PASSWORD_HASH_ALGORITHM = "pbkdf2_sha256"
 PASSWORD_HASH_ITERATIONS = 260000
-LEGACY_SALES_USER_ID = 0
+LOCAL_SALES_USER_ID = 0
 PROMPT_ITERATION_START = "V0.1"
 
 
@@ -31,6 +34,8 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, password_hash: str) -> bool:
+    if not is_password_hash(password_hash):
+        return False
     try:
         algorithm, iterations_text, salt, expected = str(password_hash or "").split("$", 3)
         if algorithm != PASSWORD_HASH_ALGORITHM:
@@ -47,7 +52,11 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def is_password_hash(value: str) -> bool:
-    return str(value or "").startswith(f"{PASSWORD_HASH_ALGORITHM}$")
+    """Accept only bounded PBKDF2 records that can actually be verified."""
+    if not isinstance(value, str):
+        return False
+    match = re.fullmatch(r"pbkdf2_sha256\$([0-9]{1,7})\$([0-9a-f]{32})\$([0-9a-f]{64})", value)
+    return bool(match and PASSWORD_HASH_ITERATIONS <= int(match[1]) <= 1000000)
 
 
 def parse_prompt_iteration_version(value: str | None) -> tuple[int, int]:
@@ -72,13 +81,13 @@ def normalize_prompt_iteration_version(value: str | None) -> str:
 
 class SalesStorage:
     def __init__(self, db_path: str | Path | None = None) -> None:
-        self.db_path = Path(db_path) if db_path is not None else Path("sales_leads.db")
+        self.db_path = Path(db_path) if db_path is not None else Path("keyword_workbench_v3.db")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.init_db()
 
     @contextmanager
     def connect(self) -> Iterator[Any]:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -90,9 +99,6 @@ class SalesStorage:
             conn.close()
 
     def init_db(self) -> None:
-        self._init_sqlite()
-
-    def _init_sqlite(self) -> None:
         with self.connect() as conn:
             conn.executescript(
                 """
@@ -134,6 +140,16 @@ class SalesStorage:
                     updated_at REAL,
                     error TEXT
                 );
+                CREATE TABLE IF NOT EXISTS task_entities (
+                    task_id INTEGER NOT NULL,
+                    sales_user_id INTEGER NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY(task_id, entity_type, platform, entity_id)
+                );
                 CREATE TABLE IF NOT EXISTS task_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id INTEGER NOT NULL,
@@ -163,6 +179,11 @@ class SalesStorage:
                     priority TEXT,
                     risk TEXT,
                     payload_json TEXT,
+                    call_id TEXT,
+                    original_decision_json TEXT,
+                    final_decision_json TEXT,
+                    rule_version TEXT,
+                    transformation_reason TEXT,
                     created_at REAL
                 );
                 CREATE TABLE IF NOT EXISTS notes (
@@ -256,7 +277,25 @@ class SalesStorage:
                     confidence REAL,
                     error TEXT,
                     duration_ms INTEGER,
+                    call_id TEXT,
+                    input_summary_truncated INTEGER,
+                    output_summary_truncated INTEGER,
                     created_at REAL
+                );
+                CREATE TABLE IF NOT EXISTS agent_call_audits (
+                    call_id TEXT PRIMARY KEY,
+                    task_id INTEGER NOT NULL,
+                    run_id TEXT,
+                    run_type TEXT NOT NULL DEFAULT 'main',
+                    agent_key TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    input_json TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    output_json TEXT,
+                    metrics_json TEXT NOT NULL,
+                    error TEXT,
+                    started_at REAL NOT NULL,
+                    finished_at REAL
                 );
                 CREATE TABLE IF NOT EXISTS prompt_versions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -306,65 +345,33 @@ class SalesStorage:
                 );
                 """
             )
-            self._migrate_common(conn)
-            self._migrate_sqlite_tenant_tables(conn)
             self._create_indexes(conn)
 
-    def _migrate_common(self, conn: Any) -> None:
-        real_type = "REAL"
-        self._add_columns(
-            conn,
-            "tasks",
-            {
-                "sales_user_id": "INTEGER NOT NULL DEFAULT 0",
-                "mode": "TEXT",
-                "demand_description": "TEXT",
-                "payload": "TEXT",
-                "status_text": "TEXT",
-                "progress_json": "TEXT",
-                "result_json": "TEXT",
-                "updated_at": real_type,
-            },
-        )
-        for table in ("notes", "comments", "leads", "lead_feedback", "task_summaries"):
-            self._add_columns(conn, table, {"sales_user_id": "INTEGER NOT NULL DEFAULT 0"})
-        self._add_columns(
-            conn,
-            "audit_decisions",
-            {
-                "run_id": "TEXT",
-                "run_type": "TEXT NOT NULL DEFAULT 'main'",
-                "platform": "TEXT NOT NULL DEFAULT 'xhs'",
-            },
-        )
-        self._add_columns(
-            conn,
-            "agent_runs",
-            {
-                "run_id": "TEXT",
-                "run_type": "TEXT NOT NULL DEFAULT 'main'",
-            },
-        )
-        self._add_columns(conn, "prompt_versions", {"iteration_version": "TEXT NOT NULL DEFAULT 'V0.1'"})
-        for table in ("notes", "comments", "leads"):
-            self._add_columns(conn, table, {"platform": "TEXT NOT NULL DEFAULT 'xhs'"})
-            conn.execute(f"UPDATE {table} SET platform = 'xhs' WHERE platform IS NULL OR platform = ''")
-        conn.execute("UPDATE audit_decisions SET platform = 'xhs' WHERE platform IS NULL OR platform = ''")
-        conn.execute("UPDATE audit_decisions SET run_type = 'main' WHERE run_type IS NULL OR run_type = ''")
-        conn.execute("UPDATE agent_runs SET run_type = 'main' WHERE run_type IS NULL OR run_type = ''")
-        conn.execute("UPDATE prompt_versions SET iteration_version = ? WHERE iteration_version IS NULL OR iteration_version = ''", (PROMPT_ITERATION_START,))
-        self._backfill_audit_platform_from_payload(conn)
-        self._backfill_sales_user_ids(conn)
+    def _save_task_entity(self, conn: Any, task_id: int, owner: int, kind: str,
+                          entity_id: Any, payload: dict[str, Any]) -> None:
+        if not entity_id:
+            return
+        conn.execute("""INSERT INTO task_entities VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(task_id,entity_type,platform,entity_id)
+            DO UPDATE SET payload=excluded.payload,created_at=excluded.created_at""",
+            (task_id, owner, kind, str(payload.get("platform") or "xhs"), str(entity_id),
+             json.dumps(payload, ensure_ascii=False), time.time()))
 
-    def _add_columns(self, conn: Any, table: str, additions: dict[str, str]) -> None:
-        columns = self._columns(conn, table)
-        for column, column_type in additions.items():
-            if column not in columns:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
-
-    def _columns(self, conn: Any, table: str) -> set[str]:
-        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-        return {str(row["name"]) for row in rows}
+    def _get_task_entity(self, kind: str, entity_id: str, task_id: int,
+                         sales_user_id: int | None = None) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            rows = conn.execute("""SELECT e.* FROM task_entities e JOIN tasks t ON t.id=e.task_id
+                WHERE e.task_id=? AND e.entity_type=? AND e.entity_id=?
+                  AND e.sales_user_id=t.sales_user_id AND (? IS NULL OR t.sales_user_id=?)""",
+                (int(task_id), kind, entity_id, sales_user_id, sales_user_id)).fetchall()
+        # A platform collision must not select an arbitrary target for a write.
+        if len(rows) != 1:
+            return None
+        row = rows[0]
+        payload = parse_json(row["payload"], {})
+        return {**payload, "task_id": row["task_id"], "sales_user_id": row["sales_user_id"],
+                "salesUserId": row["sales_user_id"], "platform": row["platform"],
+                "createdAt": row["created_at"]}
 
     def _create_indexes(self, conn: Any) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash)")
@@ -390,153 +397,21 @@ class SalesStorage:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_lead_feedback_sales_user ON lead_feedback(sales_user_id, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_task_id ON agent_runs(task_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_run ON agent_runs(task_id, run_type, run_id)")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_call ON agent_runs(call_id) WHERE call_id IS NOT NULL AND call_id != ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_call_audits_task ON agent_call_audits(task_id, started_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_decisions_call ON audit_decisions(call_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_prompt_versions_agent_status ON prompt_versions(agent_key, status)")
 
-    def _backfill_sales_user_ids(self, conn: Any) -> None:
-        for table in ("notes", "comments", "leads", "lead_feedback", "task_summaries"):
-            if "sales_user_id" not in self._columns(conn, table):
-                continue
-            conn.execute(
-                f"""
-                UPDATE {table}
-                SET sales_user_id = COALESCE(
-                    (SELECT sales_user_id FROM tasks WHERE tasks.id = {table}.task_id),
-                    sales_user_id,
-                    0
-                )
-                WHERE COALESCE(sales_user_id, 0) = 0 AND task_id IS NOT NULL
-                """
-            )
-
-    def _migrate_sqlite_tenant_tables(self, conn: Any) -> None:
-        for table in ("notes", "comments", "leads"):
-            columns = self._sqlite_column_info(conn, table)
-            if "id" not in columns or int(columns.get("id", {}).get("pk") or 0) != 1:
-                self._rebuild_sqlite_tenant_table(conn, table)
-
-    def _sqlite_column_info(self, conn: Any, table: str) -> dict[str, dict[str, Any]]:
-        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-        return {str(row["name"]): dict(row) for row in rows}
-
-    def _rebuild_sqlite_tenant_table(self, conn: Any, table: str) -> None:
-        legacy = f"{table}_legacy_{int(time.time() * 1000)}"
-        conn.execute(f"ALTER TABLE {table} RENAME TO {legacy}")
-        self._create_sqlite_tenant_table(conn, table)
-        rows = conn.execute(f"SELECT * FROM {legacy}").fetchall()
-        task_owner_cache: dict[int, int] = {}
-        for row in rows:
-            data = {key: row[key] for key in row.keys()}
-            task_id = data.get("task_id")
-            sales_user_id = int(data.get("sales_user_id") or self._task_owner(conn, task_id, task_owner_cache) or 0)
-            if table == "notes":
-                self._insert_migrated_note(conn, sales_user_id, data)
-            elif table == "comments":
-                self._insert_migrated_comment(conn, sales_user_id, data)
-            elif table == "leads":
-                self._insert_migrated_lead(conn, sales_user_id, data)
-        conn.execute(f"DROP TABLE {legacy}")
-
-    def _create_sqlite_tenant_table(self, conn: Any, table: str) -> None:
-        schemas = {
-            "notes": """
-                CREATE TABLE notes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    sales_user_id INTEGER NOT NULL DEFAULT 0,
-                    platform TEXT NOT NULL DEFAULT 'xhs',
-                    note_id TEXT NOT NULL,
-                    task_id INTEGER,
-                    title TEXT,
-                    author TEXT,
-                    url TEXT,
-                    payload TEXT,
-                    created_at REAL,
-                    UNIQUE(sales_user_id, note_id)
-                )
-            """,
-            "comments": """
-                CREATE TABLE comments (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    sales_user_id INTEGER NOT NULL DEFAULT 0,
-                    platform TEXT NOT NULL DEFAULT 'xhs',
-                    comment_id TEXT NOT NULL,
-                    task_id INTEGER,
-                    note_id TEXT,
-                    nickname TEXT,
-                    user_id TEXT,
-                    content TEXT,
-                    payload TEXT,
-                    created_at REAL,
-                    UNIQUE(sales_user_id, comment_id)
-                )
-            """,
-            "leads": """
-                CREATE TABLE leads (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    sales_user_id INTEGER NOT NULL DEFAULT 0,
-                    platform TEXT NOT NULL DEFAULT 'xhs',
-                    lead_id TEXT NOT NULL,
-                    task_id INTEGER,
-                    note_id TEXT,
-                    comment_id TEXT,
-                    score INTEGER,
-                    priority TEXT,
-                    product_tags TEXT,
-                    demand_summary TEXT,
-                    evidence TEXT,
-                    outreach_copy TEXT,
-                    feedback TEXT,
-                    payload TEXT,
-                    created_at REAL,
-                    UNIQUE(sales_user_id, lead_id)
-                )
-            """,
-        }
-        conn.execute(schemas[table])
-
-    def _task_owner(self, conn: Any, task_id: Any, cache: dict[int, int] | None = None) -> int:
+    def _task_owner(self, conn: Any, task_id: Any) -> int:
         try:
             normalized = int(task_id)
         except Exception:
-            return LEGACY_SALES_USER_ID
-        cache = cache if cache is not None else {}
-        if normalized in cache:
-            return cache[normalized]
+            return LOCAL_SALES_USER_ID
         row = conn.execute("SELECT sales_user_id FROM tasks WHERE id = ?", (normalized,)).fetchone()
-        cache[normalized] = int((row["sales_user_id"] if row else None) or LEGACY_SALES_USER_ID)
-        return cache[normalized]
+        return int((row["sales_user_id"] if row else None) or LOCAL_SALES_USER_ID)
 
-    def _insert_migrated_note(self, conn: Any, sales_user_id: int, data: dict[str, Any]) -> None:
-        note_id = str(data.get("note_id") or "")
-        if not note_id:
-            return
-        platform = str(data.get("platform") or "xhs")
-        conn.execute(
-            """
-            INSERT INTO notes(sales_user_id, platform, note_id, task_id, title, author, url, payload, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(sales_user_id, note_id) DO UPDATE SET
-                platform = excluded.platform,
-                task_id = excluded.task_id,
-                title = excluded.title,
-                author = excluded.author,
-                url = excluded.url,
-                payload = excluded.payload,
-                created_at = excluded.created_at
-            """,
-            (
-                sales_user_id,
-                platform,
-                note_id,
-                data.get("task_id"),
-                data.get("title"),
-                data.get("author"),
-                data.get("url"),
-                data.get("payload"),
-                data.get("created_at"),
-            ),
-        )
-
-    def ensure_admin_user(self, username: str, password_hash: str, display_name: str = "管理员") -> dict[str, Any]:
+    def ensure_admin_user(self, username: str, password_hash: str, display_name: str = "管理员",
+                          *, password: str | None = None) -> dict[str, Any]:
         if not is_password_hash(password_hash):
             raise ValueError("管理员密码必须使用哈希配置。")
         return self.upsert_user(
@@ -545,6 +420,7 @@ class SalesStorage:
             password_hash=password_hash,
             display_name=display_name or username,
             enabled=True,
+            password_plaintext=password,
         )
 
     def has_admin_user(self) -> bool:
@@ -578,7 +454,10 @@ class SalesStorage:
         password_hash: str | None = None,
         display_name: str = "",
         enabled: bool = True,
+        password_plaintext: str | None = None,
     ) -> dict[str, Any]:
+        if password_hash is not None and not is_password_hash(password_hash):
+            raise ValueError("密码哈希格式或迭代次数无效；未修改账号。")
         username = str(username or "").strip().lower()
         role = str(role or "").strip().lower()
         if not username:
@@ -589,6 +468,11 @@ class SalesStorage:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
             if row:
+                if password_hash and password_plaintext is not None and verify_password(password_plaintext, row["password_hash"]):
+                    # Environment passwords are salted afresh on startup; unchanged
+                    # plaintext must not turn a restart into a password rotation.
+                    password_hash = row["password_hash"]
+                password_changed = bool(password_hash and password_hash != row["password_hash"])
                 if password_hash:
                     conn.execute(
                         """
@@ -606,7 +490,7 @@ class SalesStorage:
                             now,
                             1 if enabled else 0,
                             now,
-                            now,
+                            now if password_changed else row["password_reset_at"],
                             username,
                         ),
                     )
@@ -620,6 +504,9 @@ class SalesStorage:
                         """,
                         (role, display_name, 1 if enabled else 0, now, 1 if enabled else 0, now, username),
                     )
+                if password_changed or row["role"] != role or not enabled:
+                    conn.execute("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL",
+                                 (now, row["id"]))
             else:
                 if not password_hash:
                     raise ValueError("新用户必须设置密码哈希。")
@@ -786,83 +673,6 @@ class SalesStorage:
             "passwordResetAt": row["password_reset_at"],
         }
 
-    def _insert_migrated_comment(self, conn: Any, sales_user_id: int, data: dict[str, Any]) -> None:
-        comment_id = str(data.get("comment_id") or "")
-        if not comment_id:
-            return
-        platform = str(data.get("platform") or "xhs")
-        conn.execute(
-            """
-            INSERT INTO comments(sales_user_id, platform, comment_id, task_id, note_id, nickname, user_id, content, payload, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(sales_user_id, comment_id) DO UPDATE SET
-                platform = excluded.platform,
-                task_id = excluded.task_id,
-                note_id = excluded.note_id,
-                nickname = excluded.nickname,
-                user_id = excluded.user_id,
-                content = excluded.content,
-                payload = excluded.payload,
-                created_at = excluded.created_at
-            """,
-            (
-                sales_user_id,
-                platform,
-                comment_id,
-                data.get("task_id"),
-                data.get("note_id"),
-                data.get("nickname"),
-                data.get("user_id"),
-                data.get("content"),
-                data.get("payload"),
-                data.get("created_at"),
-            ),
-        )
-
-    def _insert_migrated_lead(self, conn: Any, sales_user_id: int, data: dict[str, Any]) -> None:
-        lead_id = str(data.get("lead_id") or "")
-        if not lead_id:
-            return
-        platform = str(data.get("platform") or "xhs")
-        conn.execute(
-            """
-            INSERT INTO leads(sales_user_id, platform, lead_id, task_id, note_id, comment_id, score, priority,
-            product_tags, demand_summary, evidence, outreach_copy, feedback, payload, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(sales_user_id, lead_id) DO UPDATE SET
-                platform = excluded.platform,
-                task_id = excluded.task_id,
-                note_id = excluded.note_id,
-                comment_id = excluded.comment_id,
-                score = excluded.score,
-                priority = excluded.priority,
-                product_tags = excluded.product_tags,
-                demand_summary = excluded.demand_summary,
-                evidence = excluded.evidence,
-                outreach_copy = excluded.outreach_copy,
-                feedback = excluded.feedback,
-                payload = excluded.payload,
-                created_at = excluded.created_at
-            """,
-            (
-                sales_user_id,
-                platform,
-                lead_id,
-                data.get("task_id"),
-                data.get("note_id"),
-                data.get("comment_id"),
-                data.get("score"),
-                data.get("priority"),
-                data.get("product_tags"),
-                data.get("demand_summary"),
-                data.get("evidence"),
-                data.get("outreach_copy"),
-                data.get("feedback"),
-                data.get("payload"),
-                data.get("created_at"),
-            ),
-        )
-
     def create_task(
         self,
         payload: dict[str, Any],
@@ -871,7 +681,7 @@ class SalesStorage:
         sales_user_id: int | None = None,
     ) -> int:
         now = time.time()
-        owner_id = int(sales_user_id or LEGACY_SALES_USER_ID)
+        owner_id = int(sales_user_id or LOCAL_SALES_USER_ID)
         demand_description = str(payload.get("demandDescription") or payload.get("demand_description") or "").strip()
         if not demand_description:
             demand_description = str(payload.get("businessDirectionLabel") or payload.get("businessDirection") or "").strip()
@@ -994,9 +804,11 @@ class SalesStorage:
         with self.connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT t.*,
-                       (SELECT COUNT(*) FROM notes n WHERE n.task_id = t.id) AS notes_count,
-                       (SELECT COUNT(*) FROM leads l WHERE l.task_id = t.id) AS leads_count,
+                SELECT t.id, t.sales_user_id, t.status, t.mode, t.business_direction,
+                       t.demand_description, t.keyword, t.payload, t.status_text,
+                       t.progress_json, t.started_at, t.finished_at, t.updated_at, t.error,
+                       (SELECT COUNT(*) FROM task_entities n WHERE n.task_id = t.id AND n.entity_type = 'note') AS notes_count,
+                       (SELECT COUNT(*) FROM task_entities l WHERE l.task_id = t.id AND l.entity_type = 'lead') AS leads_count,
                        (SELECT COUNT(*) FROM task_events e WHERE e.task_id = t.id) AS events_count
                 FROM tasks t
                 {where}
@@ -1017,8 +829,8 @@ class SalesStorage:
             row = conn.execute(
                 f"""
                 SELECT t.*,
-                       (SELECT COUNT(*) FROM notes n WHERE n.task_id = t.id) AS notes_count,
-                       (SELECT COUNT(*) FROM leads l WHERE l.task_id = t.id) AS leads_count,
+                       (SELECT COUNT(*) FROM task_entities n WHERE n.task_id = t.id AND n.entity_type = 'note') AS notes_count,
+                       (SELECT COUNT(*) FROM task_entities l WHERE l.task_id = t.id AND l.entity_type = 'lead') AS leads_count,
                        (SELECT COUNT(*) FROM task_events e WHERE e.task_id = t.id) AS events_count
                 FROM tasks t WHERE {where}
                 """,
@@ -1040,21 +852,21 @@ class SalesStorage:
             ).fetchall()
         task = self._task_summary(row)
         task["events"] = [self._event_to_dict(event) for event in event_rows]
-        task["result"] = self._json_loads(row["result_json"], None)
+        task["result"] = parse_json(row["result_json"], None)
         return task
 
     def _task_summary(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
             "id": int(row["id"]),
-            "salesUserId": int(row["sales_user_id"] or LEGACY_SALES_USER_ID),
+            "salesUserId": int(row["sales_user_id"] or LOCAL_SALES_USER_ID),
             "status": row["status"],
             "mode": row["mode"] or "single",
             "businessDirection": row["business_direction"] or "",
-            "demandDescription": row["demand_description"] or (self._json_loads(row["payload"], {}) or {}).get("demandDescription", ""),
+            "demandDescription": row["demand_description"] or (parse_json(row["payload"], {}) or {}).get("demandDescription", ""),
             "keyword": row["keyword"] or "",
-            "payload": self._json_loads(row["payload"], {}),
+            "payload": parse_json(row["payload"], {}),
             "statusText": row["status_text"] or "",
-            "progress": self._json_loads(row["progress_json"], {}),
+            "progress": parse_json(row["progress_json"], {}),
             "startedAt": row["started_at"],
             "finishedAt": row["finished_at"],
             "updatedAt": row["updated_at"] or row["started_at"],
@@ -1093,33 +905,22 @@ class SalesStorage:
                         str(item.get("risk") or "")[:1000],
                         self._compact_json(item.get("payload") or {}),
                         now,
+                        str(item.get("call_id") or item.get("callId") or "") or None,
+                        self._redacted_audit_json(item.get("original_decision", item.get("originalDecision"))),
+                        self._redacted_audit_json(item.get("final_decision", item.get("finalDecision"))),
+                        str(item.get("rule_version") or item.get("ruleVersion") or "") or None,
+                        self._redacted_audit_text(item.get("transformation_reason") or item.get("transformationReason") or "") or None,
                     )
                 )
             conn.executemany(
                 """
                 INSERT INTO audit_decisions(task_id, sales_user_id, run_id, run_type, platform, stage, entity_type, entity_id, note_id,
-                source_keyword, decision, reason, evidence_json, score, confidence, priority, risk, payload_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_keyword, decision, reason, evidence_json, score, confidence, priority, risk, payload_json, created_at,
+                call_id, original_decision_json, final_decision_json, rule_version, transformation_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
-
-    def _backfill_audit_platform_from_payload(self, conn: Any) -> None:
-        rows = conn.execute(
-            """
-            SELECT id, platform, payload_json
-            FROM audit_decisions
-            WHERE stage = 'relevance' AND COALESCE(payload_json, '') != ''
-            """
-        ).fetchall()
-        for row in rows:
-            if row["platform"] not in ("", "xhs", None):
-                continue
-            payload = self._json_loads(row["payload_json"], {})
-            note = payload.get("note") if isinstance(payload, dict) else {}
-            platform = str((note or {}).get("platform") or "").strip()
-            if platform and platform != row["platform"]:
-                conn.execute("UPDATE audit_decisions SET platform = ? WHERE id = ?", (platform, row["id"]))
 
     def save_audit_decision(self, task_id: int | None, **item: Any) -> None:
         self.save_audit_decisions(task_id, [item])
@@ -1192,7 +993,7 @@ class SalesStorage:
             "level": row["level"],
             "agent": row["agent"] or "",
             "message": row["message"],
-            "data": self._json_loads(row["data"], None),
+            "data": parse_json(row["data"], None),
             "createdAt": row["created_at"],
         }
 
@@ -1200,7 +1001,7 @@ class SalesStorage:
         return {
             "id": int(row["id"]),
             "taskId": int(row["task_id"]),
-            "salesUserId": int(row["sales_user_id"] or LEGACY_SALES_USER_ID),
+            "salesUserId": int(row["sales_user_id"] or LOCAL_SALES_USER_ID),
             "runId": row["run_id"] or "",
             "runType": row["run_type"] or "main",
             "platform": row["platform"] or "xhs",
@@ -1211,22 +1012,31 @@ class SalesStorage:
             "sourceKeyword": row["source_keyword"] or "",
             "decision": row["decision"] or "",
             "reason": row["reason"] or "",
-            "evidence": self._json_loads(row["evidence_json"], []),
+            "evidence": parse_json(row["evidence_json"], []),
             "score": row["score"],
             "confidence": row["confidence"],
             "priority": row["priority"] or "",
             "risk": row["risk"] or "",
-            "payload": self._json_loads(row["payload_json"], {}),
+            "payload": parse_json(row["payload_json"], {}),
+            "callId": row["call_id"] or "",
+            "originalDecision": parse_json(row["original_decision_json"], None),
+            "finalDecision": parse_json(row["final_decision_json"], None),
+            "ruleVersion": row["rule_version"] or "",
+            "transformationReason": row["transformation_reason"] or "",
             "createdAt": row["created_at"],
         }
 
-    def _json_loads(self, value: Any, default: Any) -> Any:
-        if not value:
-            return default
-        try:
-            return json.loads(value)
-        except Exception:
-            return default
+    @staticmethod
+    def _redacted_audit_json(value: Any) -> str | None:
+        if value is None:
+            return None
+        from agent_harness.runtime import redact_audit
+        return json.dumps(redact_audit(value), ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _redacted_audit_text(value: Any) -> str:
+        from agent_harness.runtime import redact_audit
+        return str(redact_audit(str(value or "")))
 
     def _compact_json(self, value: Any, limit: int = 4000) -> str:
         text = json.dumps(value if value is not None else {}, ensure_ascii=False, default=str)
@@ -1244,6 +1054,7 @@ class SalesStorage:
         platform = str(note.get("platform") or "xhs")
         with self.connect() as conn:
             sales_user_id = self._task_owner(conn, task_id)
+            self._save_task_entity(conn, task_id, sales_user_id, "note", note.get("id"), note)
             conn.execute(
                 """
                 INSERT INTO notes(sales_user_id, platform, note_id, task_id, title, author, url, payload, created_at)
@@ -1277,6 +1088,7 @@ class SalesStorage:
         platform = str(comment.get("platform") or "xhs")
         with self.connect() as conn:
             sales_user_id = self._task_owner(conn, task_id)
+            self._save_task_entity(conn, task_id, sales_user_id, "comment", comment.get("id"), {**comment, "note_id": note_id, "nickname": nickname, "user_id": user_id})
             conn.execute(
                 """
                 INSERT INTO comments(sales_user_id, platform, comment_id, task_id, note_id, nickname, user_id, content, payload, created_at)
@@ -1313,6 +1125,7 @@ class SalesStorage:
         )
         with self.connect() as conn:
             sales_user_id = self._task_owner(conn, task_id)
+            self._save_task_entity(conn, task_id, sales_user_id, "lead", lead.get("lead_id"), lead)
             conn.execute(
                 """
                 INSERT INTO leads(sales_user_id, platform, lead_id, task_id, note_id, comment_id, score, priority, product_tags,
@@ -1352,7 +1165,9 @@ class SalesStorage:
                 ),
             )
 
-    def get_lead(self, lead_id: str, sales_user_id: int | None = None) -> dict[str, Any] | None:
+    def get_lead(self, lead_id: str, sales_user_id: int | None = None, task_id: int | None = None) -> dict[str, Any] | None:
+        if task_id is not None:
+            return self._get_task_entity("lead", lead_id, task_id, sales_user_id)
         where = "lead_id = ?"
         params: list[Any] = [lead_id]
         if sales_user_id is not None:
@@ -1362,7 +1177,15 @@ class SalesStorage:
             row = conn.execute(f"SELECT * FROM leads WHERE {where} ORDER BY id DESC LIMIT 1", params).fetchone()
         return self._lead_to_dict(row) if row else None
 
-    def get_comment(self, comment_id: str, sales_user_id: int | None = None) -> dict[str, Any] | None:
+    def get_comment(self, comment_id: str, sales_user_id: int | None = None, task_id: int | None = None) -> dict[str, Any] | None:
+        if task_id is not None:
+            item = self._get_task_entity("comment", comment_id, task_id, sales_user_id)
+            if item is None:
+                return None
+            return {"commentId": comment_id, "taskId": task_id, "salesUserId": item["sales_user_id"],
+                    "platform": item["platform"], "noteId": item.get("note_id"),
+                    "nickname": item.get("nickname") or "", "userId": item.get("user_id") or "",
+                    "content": item.get("content") or "", "payload": item, "createdAt": item["createdAt"]}
         where = "comment_id = ?"
         params: list[Any] = [comment_id]
         if sales_user_id is not None:
@@ -1372,11 +1195,26 @@ class SalesStorage:
             row = conn.execute(f"SELECT * FROM comments WHERE {where} ORDER BY id DESC LIMIT 1", params).fetchone()
         return self._comment_to_dict(row) if row else None
 
-    def comment_identities(self, comment_ids: list[str], sales_user_id: int | None = None) -> dict[str, dict[str, str]]:
+    def comment_identities(self, comment_ids: list[str], sales_user_id: int | None = None, task_id: int | None = None) -> dict[str, dict[str, str]]:
         ids = [str(item) for item in comment_ids if item]
         if not ids:
             return {}
         placeholders = ",".join("?" for _ in ids)
+        if task_id is not None:
+            with self.connect() as conn:
+                rows = conn.execute(f"""SELECT e.* FROM task_entities e JOIN tasks t ON t.id=e.task_id
+                    WHERE e.task_id=? AND e.entity_type='comment' AND e.entity_id IN ({placeholders})
+                    AND e.sales_user_id=t.sales_user_id AND (? IS NULL OR t.sales_user_id=?)""",
+                    [task_id, *ids, sales_user_id, sales_user_id]).fetchall()
+            result, ambiguous = {}, set()
+            for row in rows:
+                comment_id = row["entity_id"]
+                if comment_id in result:
+                    ambiguous.add(comment_id)
+                item = parse_json(row["payload"], {})
+                result[comment_id] = {"platform": row["platform"], "nickname": item.get("nickname") or "",
+                                      "user_id": item.get("user_id") or ""}
+            return {key: value for key, value in result.items() if key not in ambiguous}
         owner_filter = ""
         params: list[Any] = ids
         if sales_user_id is not None:
@@ -1397,7 +1235,7 @@ class SalesStorage:
         }
 
     def _lead_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
-        payload = self._json_loads(row["payload"], {})
+        payload = parse_json(row["payload"], {})
         payload.update({
             "lead_id": row["lead_id"],
             "task_id": row["task_id"],
@@ -1418,7 +1256,7 @@ class SalesStorage:
         return payload
 
     def _comment_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
-        payload = self._json_loads(row["payload"], {})
+        payload = parse_json(row["payload"], {})
         return {
             "commentId": row["comment_id"],
             "taskId": row["task_id"],
@@ -1458,13 +1296,17 @@ class SalesStorage:
         duration_ms: int,
         run_id: str = "",
         run_type: str = "main",
+        call_id: str = "",
+        input_summary_truncated: bool | None = None,
+        output_summary_truncated: bool | None = None,
     ) -> None:
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO agent_runs(task_id, run_id, run_type, agent_key, agent_name, prompt_version, model, purpose,
-                input_summary, output_summary, confidence, error, duration_ms, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                input_summary, output_summary, confidence, error, duration_ms, created_at,
+                call_id, input_summary_truncated, output_summary_truncated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -1481,8 +1323,47 @@ class SalesStorage:
                     error,
                     duration_ms,
                     time.time(),
+                    call_id or None,
+                    input_summary_truncated,
+                    output_summary_truncated,
                 ),
             )
+
+    def start_agent_call(self, *, call_id: str, task_id: int, run_id: str = "", run_type: str = "main",
+                         agent_key: str, input_payload: Any, request: dict[str, Any],
+                         metrics: dict[str, Any], started_at: float) -> None:
+        """Append the complete redacted request before sending it; never backfill old runs."""
+        with self.connect() as conn:
+            conn.execute("""INSERT INTO agent_call_audits(call_id,task_id,run_id,run_type,agent_key,status,
+                input_json,request_json,metrics_json,started_at) VALUES(?,?,?,?,?,'running',?,?,?,?)""",
+                (call_id, task_id, run_id, run_type, agent_key, self._redacted_audit_json(input_payload),
+                 self._redacted_audit_json(request), self._redacted_audit_json(metrics), started_at))
+
+    def finish_agent_call(self, call_id: str, *, status: str, output: Any,
+                          metrics: dict[str, Any], error: str = "") -> None:
+        if status not in {"completed", "failed"}:
+            raise ValueError("模型调用状态必须为 completed 或 failed")
+        with self.connect() as conn:
+            changed = conn.execute("""UPDATE agent_call_audits SET status=?,output_json=?,metrics_json=?,error=?,finished_at=?
+                WHERE call_id=? AND status='running'""", (status, self._redacted_audit_json(output),
+                self._redacted_audit_json(metrics), self._redacted_audit_text(error), time.time(), call_id)).rowcount
+            if changed != 1:
+                raise ValueError("模型调用审计不存在或已经完成，不能覆盖")
+
+    def get_agent_call(self, call_id: str, *, task_id: int | None = None,
+                       sales_user_id: int | None = None) -> dict[str, Any] | None:
+        """Fetch full evidence only on demand, behind the same task ownership boundary."""
+        with self.connect() as conn:
+            row = conn.execute("""SELECT a.* FROM agent_call_audits a JOIN tasks t ON t.id=a.task_id
+                WHERE a.call_id=? AND (? IS NULL OR a.task_id=?) AND (? IS NULL OR t.sales_user_id=?)""",
+                (call_id, task_id, task_id, sales_user_id, sales_user_id)).fetchone()
+        if row is None:
+            return None
+        return {"callId": row["call_id"], "taskId": row["task_id"], "runId": row["run_id"] or "",
+            "runType": row["run_type"], "agentKey": row["agent_key"], "status": row["status"],
+            "input": parse_json(row["input_json"], None), "request": parse_json(row["request_json"], None),
+            "output": parse_json(row["output_json"], None), "metrics": parse_json(row["metrics_json"], {}),
+            "error": row["error"] or "", "startedAt": row["started_at"], "finishedAt": row["finished_at"]}
 
     def list_agent_runs(
         self,
@@ -1505,7 +1386,8 @@ class SalesStorage:
                 where = " AND ".join(filters)
                 rows = conn.execute(
                     f"""
-                    SELECT * FROM agent_runs
+                    SELECT *, EXISTS(SELECT 1 FROM agent_call_audits a WHERE a.call_id=agent_runs.call_id) AS has_full_audit
+                    FROM agent_runs
                     WHERE {where}
                     ORDER BY id ASC
                     LIMIT ?
@@ -1515,7 +1397,8 @@ class SalesStorage:
             else:
                 rows = conn.execute(
                     """
-                    SELECT * FROM agent_runs
+                    SELECT *, EXISTS(SELECT 1 FROM agent_call_audits a WHERE a.call_id=agent_runs.call_id) AS has_full_audit
+                    FROM agent_runs
                     ORDER BY id DESC
                     LIMIT ?
                     """,
@@ -1524,12 +1407,16 @@ class SalesStorage:
         return [self._agent_run_to_dict(row) for row in rows]
 
     def _agent_run_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
-        output = self._json_loads(row["output_summary"], None)
+        output = parse_json(row["output_summary"], None)
         return {
             "id": int(row["id"]),
             "taskId": int(row["task_id"]),
             "runId": row["run_id"] or "",
             "runType": row["run_type"] or "main",
+            "callId": row["call_id"] or "",
+            "inputSummaryTruncated": bool(row["input_summary_truncated"]) if row["input_summary_truncated"] is not None else None,
+            "outputSummaryTruncated": bool(row["output_summary_truncated"]) if row["output_summary_truncated"] is not None else None,
+            "hasFullAudit": bool(row["has_full_audit"]),
             "agentKey": row["agent_key"],
             "agentName": row["agent_name"],
             "promptVersion": row["prompt_version"] or "",
@@ -1700,8 +1587,8 @@ class SalesStorage:
                 fallback = conn.execute(
                     """
                     SELECT id FROM prompt_versions
-                    WHERE agent_key = ? AND status != 'disabled'
-                    ORDER BY score DESC, activated_at DESC, id DESC
+                    WHERE agent_key = ? AND status != 'disabled' AND activated_at IS NOT NULL
+                    ORDER BY activated_at DESC, id DESC
                     LIMIT 1
                     """,
                     (agent_key,),
@@ -1755,7 +1642,7 @@ class SalesStorage:
             "prompt": row["prompt"],
             "notes": row["notes"] or "",
             "sourceTaskId": row["source_task_id"],
-            "metrics": self._json_loads(row["metrics"], {}),
+            "metrics": parse_json(row["metrics"], {}),
             "createdAt": row["created_at"],
             "activatedAt": row["activated_at"],
             "disabledAt": row["disabled_at"],
@@ -1793,7 +1680,7 @@ class SalesStorage:
                 "inputExcerpt": row["input_excerpt"] or "",
                 "expectedBehavior": row["expected_behavior"] or "",
                 "sourceId": row["source_id"] or "",
-                "payload": self._json_loads(row["payload"], {}),
+                "payload": parse_json(row["payload"], {}),
                 "createdAt": row["created_at"],
             }
             for row in rows
@@ -1828,7 +1715,7 @@ class SalesStorage:
                 "evalType": row["eval_type"] or "",
                 "agentKey": row["agent_key"] or "",
                 "score": float(row["score"] or 0.0),
-                "payload": self._json_loads(row["payload"], {}),
+                "payload": parse_json(row["payload"], {}),
                 "createdAt": row["created_at"],
             }
             for row in rows
@@ -1867,21 +1754,35 @@ class SalesStorage:
             row = conn.execute("SELECT * FROM task_summaries WHERE task_id = ?", (task_id,)).fetchone()
         if not row:
             return {}
-        payload = self._json_loads(row["payload"], {})
+        payload = parse_json(row["payload"], {})
         payload.setdefault("task_summary", row["summary"] or "")
-        payload.setdefault("agent_summaries", self._json_loads(row["agent_summaries"], []))
+        payload.setdefault("agent_summaries", parse_json(row["agent_summaries"], []))
         payload.setdefault("evolution_summary", row["evolution_summary"] or "")
         return payload
 
-    def save_feedback(self, lead_id: str, feedback: str, sales_user_id: int | None = None) -> None:
+    def save_feedback(self, lead_id: str, feedback: str, sales_user_id: int | None = None,
+                       task_id: int | None = None) -> None:
         where = "lead_id = ?"
         params: list[Any] = [feedback]
         id_params: list[Any] = [lead_id]
         if sales_user_id is not None:
             where += " AND sales_user_id = ?"
             id_params.append(int(sales_user_id))
+        if task_id is not None:
+            where += " AND task_id = ?"
+            id_params.append(int(task_id))
         with self.connect() as conn:
             conn.execute(f"UPDATE leads SET feedback = ? WHERE {where}", [*params, *id_params])
+            if task_id is not None:
+                rows = conn.execute("""SELECT * FROM task_entities WHERE task_id=? AND entity_type='lead'
+                    AND entity_id=? AND (? IS NULL OR sales_user_id=?)""",
+                    (task_id, lead_id, sales_user_id, sales_user_id)).fetchall()
+                for row in rows:
+                    item = parse_json(row["payload"], {})
+                    item["feedback"] = feedback
+                    conn.execute("""UPDATE task_entities SET payload=? WHERE task_id=? AND entity_type='lead'
+                        AND platform=? AND entity_id=?""",
+                        (json.dumps(item, ensure_ascii=False), task_id, row["platform"], lead_id))
 
     def create_lead_feedback(
         self,
@@ -2017,7 +1918,7 @@ class SalesStorage:
             "evidence": row["evidence"] or "",
             "expectedResult": row["expected_result"] or "",
             "status": row["status"] or "",
-            "analysis": self._json_loads(row["analysis_json"], {}),
+            "analysis": parse_json(row["analysis_json"], {}),
             "candidatePromptId": row["candidate_prompt_id"],
             "targetAgentKey": row["target_agent_key"] or "",
             "createdAt": row["created_at"],
